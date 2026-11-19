@@ -224,7 +224,7 @@ export function TestimonialsPage() {
         {loading ? (
           <div className="col-span-full py-12 text-center text-sm text-[#64748B]">Loading testimonials...</div>
         ) : items.length === 0 ? (
-          <div className="col-span-full py-12 text-center text-sm text-[#64748B]">No testimonials yet.</div>
+          <div className="col-span-full py-12 text-center text-sm text-[#64748B]">No verified client testimonials are published on the current main website. Add an approved customer quote here when consent is available.</div>
         ) : (
           items.map((item) => (
             <div key={item.id} className="rounded-xl border border-[#DDE5F0] bg-white p-6 flex flex-col justify-between">
