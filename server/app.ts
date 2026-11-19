@@ -1300,7 +1300,6 @@ export function createApiApp(): express.Express {
 
   // ============================================================
   // IMPORT CURRENT MAIN-SITE CONTENT (IDEMPOTENT, SUPER-ADMIN ONLY)
-  // ============================================================
 
   app.post('/api/content/import-main-site', requireAuth, async (req: AuthenticatedRequest, res) => {
     if (req.adminUser?.role !== 'super_admin') {
@@ -1308,28 +1307,48 @@ export function createApiApp(): express.Express {
       return;
     }
 
-    const imported: Record<string, number> = { page: 0, service: 0, solution: 0 };
-    const skipped: Record<string, number> = { page: 0, service: 0, solution: 0 };
+    const imported: Record<string, number> = { page: 0, service: 0, solution: 0, article: 0, media: 0 };
+    const skipped: Record<string, number> = { page: 0, service: 0, solution: 0, article: 0, media: 0 };
     const now = new Date().toISOString();
 
-    const importRecords = async (docType: 'page' | 'service' | 'solution', records: any[]) => {
+    const importRecords = async (
+      docType: 'page' | 'service' | 'solution' | 'article',
+      records: any[],
+      defaultStatus: 'draft' | 'published' = 'published'
+    ) => {
       const existing = await listDocuments<any>(docType);
-      const existingSlugs = new Set(existing.map((item) => String(item.slug || '').replace(/\/$/, '') || '/'));
+      const normalized = (value: unknown) => String(value || '').replace(/\/$/, '') || '/';
+      const byId = new Map(existing.map((item) => [item.id, item]));
+      const bySlug = new Map(existing.map((item) => [normalized(item.slug), item]));
+
       for (const record of records) {
-        const normalizedSlug = String(record.slug || '').replace(/\/$/, '') || '/';
-        if (existingSlugs.has(normalizedSlug) || existing.some((item) => item.id === record.id)) {
+        const existingById = byId.get(record.id);
+        const existingBySlug = bySlug.get(normalized(record.slug));
+        const status = record.status === 'draft' ? 'draft' : defaultStatus;
+
+        // Replace only the two untouched starter records shipped with the original CMS.
+        // Do not overwrite any content previously imported or edited by an administrator.
+        const replaceStarter =
+          docType === 'page' &&
+          existingBySlug &&
+          ['page-home', 'page-about'].includes(existingBySlug.id) &&
+          !existingBySlug.source;
+
+        if (existingById || (existingBySlug && !replaceStarter)) {
           skipped[docType] += 1;
           continue;
         }
+
         const payload = {
           ...record,
-          status: 'published',
-          publishedAt: now,
+          ...(replaceStarter ? { id: existingBySlug.id } : {}),
+          source: 'main-site',
+          status,
+          publishedAt: status === 'published' ? record.publishedAt || now : record.publishedAt || null,
           updatedAt: now,
           updatedBy: req.adminUser!.username,
         };
         await saveDocument(docType, payload, req.adminUser!.username);
-        existingSlugs.add(normalizedSlug);
         imported[docType] += 1;
       }
     };
@@ -1346,10 +1365,23 @@ export function createApiApp(): express.Express {
       },
     }));
 
+    const solutionImages: Record<string, string> = {
+      'business-website-design-and-development': 'website-development.jpeg',
+      'online-store-development': 'online-store-development.jpeg',
+      'custom-software-for-businesses': 'custom-software.jpeg',
+      'mobile-app-development': 'mobile-app-development.jpeg',
+      'customer-chatbots-and-assistants': 'customer-chatbots.jpeg',
+      'business-workflow-automation': 'business-workflow-automation.jpeg',
+      'ui-ux-design-for-websites-and-apps': 'ui-ux-design.jpeg',
+      'software-and-api-integrations': 'software-api-integrations.jpeg',
+      'website-care-and-maintenance': 'website-care-maintenance.jpeg',
+    };
+
     const makeOffering = (kind: 'service' | 'solution', item: readonly [string, string, string]) => {
       const [title, summary, featureText] = item;
       const slug = title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       const metaTitle = `${title} | RYZITE`;
+      const imageFile = kind === 'solution' ? solutionImages[slug] : undefined;
       return {
         id: `main-site-${kind}-${slug}`,
         type: kind,
@@ -1359,8 +1391,10 @@ export function createApiApp(): express.Express {
         summary,
         description: summary,
         iconName: kind === 'service' ? 'Megaphone' : 'Code2',
-        imageUrl: '',
-        imageAlt: '',
+        imageUrl: imageFile
+          ? `https://raw.githubusercontent.com/Nisla1234/ryzite-website-development/vercel-migration/public/images/solutions/${imageFile}`
+          : '',
+        imageAlt: imageFile ? `${title} — RYZITE technology solution` : '',
         features: featureText.split(';').map((value) => value.trim()).filter(Boolean),
         benefits: [],
         ctaText: 'Get a Quote',
@@ -1368,8 +1402,6 @@ export function createApiApp(): express.Express {
         displayOrder: 0,
         status: 'published',
         seo: { metaTitle, metaDescription: summary },
-        updatedAt: now,
-        updatedBy: req.adminUser!.username,
         source: 'main-site',
       };
     };
@@ -1377,6 +1409,35 @@ export function createApiApp(): express.Express {
     await importRecords('page', pageRecords);
     await importRecords('service', mainSiteSeed.services.map((item, index) => ({ ...makeOffering('service', item), displayOrder: index + 1 })));
     await importRecords('solution', mainSiteSeed.solutions.map((item, index) => ({ ...makeOffering('solution', item), displayOrder: index + 1 })));
+    await importRecords('article', mainSiteSeed.articles.map((article, index) => ({
+      ...article,
+      status: 'draft',
+      displayOrder: index + 1,
+      featuredImageUrl: '',
+      featuredImageAlt: '',
+      publishedAt: '',
+      seo: {
+        metaTitle: `${article.title} | RYZITE Insights`,
+        metaDescription: article.excerpt,
+        ogTitle: article.title,
+        ogDescription: article.excerpt,
+      },
+    })), 'draft');
+
+    for (const [id, originalName, mimeType, sizeBytes, url, altText] of mainSiteSeed.media) {
+      const existing = await dbGet<{ id: string }>('SELECT id FROM media_assets WHERE id = $1', [id]);
+      if (existing) {
+        skipped.media += 1;
+        continue;
+      }
+      await dbRun(
+        `INSERT INTO media_assets (id, file_name, original_name, mime_type, size_bytes, url, alt_text, source, uploaded_by, uploaded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT(id) DO NOTHING`,
+        [id, originalName, originalName, mimeType, sizeBytes, url, altText, 'main-site', req.adminUser!.username, now]
+      );
+      imported.media += 1;
+    }
 
     const totalImported = Object.values(imported).reduce((sum, count) => sum + count, 0);
     await logAudit({
@@ -1387,7 +1448,7 @@ export function createApiApp(): express.Express {
       recordId: 'main-site-import',
       recordTitle: 'Main website content import',
       result: 'success',
-      details: `Imported ${totalImported} current main-site records. Added: ${JSON.stringify(imported)}. Preserved existing records: ${JSON.stringify(skipped)}.`,
+      details: `Imported ${totalImported} main-site records. Added: ${JSON.stringify(imported)}. Preserved existing records: ${JSON.stringify(skipped)}.`,
       ipAddress: getClientIp(req),
     });
 
@@ -1395,11 +1456,15 @@ export function createApiApp(): express.Express {
       ok: true,
       imported,
       skipped,
-      note: 'This imports a snapshot of the current main-site source content into the Control Centre CMS. It does not yet publish CMS edits back to the static main website.',
+      unavailable: {
+        portfolio: 'The live Our Work page explicitly says there are no approved project case studies yet.',
+        team: 'The current main-site source does not publish team member profiles.',
+        testimonial: 'The current main-site source does not publish verified client testimonials.',
+      },
+      note: 'Main-site pages, service and solution catalogues, editorial topic drafts, and repository media assets are now available in their matching Control Centre modules. Editorial ideas remain drafts. Portfolio, Team, and Testimonials are not fabricated. This is a CMS import; it does not yet deploy CMS edits to the static main website.',
     });
   });
 
-  // ============================================================
   // UNIFIED CMS CONTENT CRUD ENDPOINTS
   // ============================================================
 
