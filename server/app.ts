@@ -1314,9 +1314,9 @@ export function createApiApp(): express.Express {
 
     const importRecords = async (docType: 'page' | 'service' | 'solution', records: any[]) => {
       const existing = await listDocuments<any>(docType);
-      const existingSlugs = new Set(existing.map((item) => String(item.slug || '').replace(/\\/$/, '') || '/'));
+      const existingSlugs = new Set(existing.map((item) => String(item.slug || '').replace(/\/$/, '') || '/'));
       for (const record of records) {
-        const normalizedSlug = String(record.slug || '').replace(/\\/$/, '') || '/';
+        const normalizedSlug = String(record.slug || '').replace(/\/$/, '') || '/';
         if (existingSlugs.has(normalizedSlug) || existing.some((item) => item.id === record.id)) {
           skipped[docType] += 1;
           continue;
