@@ -83,20 +83,51 @@ The script prompts interactively (with masked password input), hashes the new pa
 
 ---
 
-## GitHub & Deployment Workflow
+## Production Hosting on Vercel + Neon PostgreSQL
 
-Target repository: `https://github.com/Nisla1234/ryzite-website-development`
+Target repository: `https://github.com/Nisla1234/RYZITE-Control-Centre`  
+Vercel project: `ryzite-control-centre`
 
-1. Create an isolated feature branch before pushing:
-   ```bash
-   git checkout -b feat/ryzite-control-centre
-   ```
-2. Verify `.env`, `data/`, and `uploads/` are ignored by `.gitignore`.
-3. Build for production:
-   ```bash
-   npm run build
-   npm start
-   ```
-4. **Vercel / Astro / Cloudflare Compatibility Note**:
-   - If the existing RYZITE public site is deployed on **Astro + Cloudflare Pages**, host RYZITE Control Centre as a dedicated Node/Vercel service mapped to `/admin/*` via Cloudflare/Vercel rewrites or a subdomain (`cms.ryzite.com`), keeping the public Astro site's build pipeline untouched.
-   - Disable **Vercel Deployment Protection / SSO** on the `/admin/` public login route so visitors see the RYZITE login screen rather than a Vercel SSO gate; all dashboard routes and `/api/*` endpoints remain protected by RYZITE's own HttpOnly session middleware.
+RYZITE Control Centre is configured to deploy both the Vite admin frontend (`dist/`) and the full Express API backend (`api/index.ts`) on Vercel using `vercel.json`, backed by a persistent **Neon PostgreSQL** database.
+
+### 1. Vercel Build & Routing Configuration (`vercel.json`)
+
+- **Framework Preset**: Vite
+- **Build Command**: `npm run build`
+- **Output Directory**: `dist`
+- **Serverless API Entry**: `api/index.ts` (all `/api/*` requests rewrite to `/api/index`)
+- **SPA Fallback**: All non-API routes (including `/admin/` and direct refreshes on `/admin/*`) rewrite to `/index.html`
+
+### 2. Required Vercel Environment Variables
+
+Set these in **Vercel Dashboard → Project `ryzite-control-centre` → Settings → Environment Variables** (never commit `.env` to Git):
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | **Yes** | Neon PostgreSQL connection string (`postgresql://...?sslmode=require`) |
+| `SESSION_SECRET` | **Yes** | Strong random secret (≥ 32 chars) used to HMAC-sign session tokens |
+| `ADMIN_USERNAME` | **Yes** (first boot) | Initial administrator username created on an empty database |
+| `ADMIN_PASSWORD` | **Yes** (first boot) | Initial administrator password (hashed with `scrypt` on first boot) |
+| `ADMIN_NAME` | Recommended | Initial administrator display name |
+| `ADMIN_EMAIL` | Recommended | Initial administrator email address |
+| `SANITY_PROJECT_ID` | Recommended | Sanity project ID (`hnm8jy5w`) |
+| `SANITY_DATASET` | Recommended | Sanity dataset (`production`) |
+| `SANITY_API_TOKEN` | Recommended | Server-side Sanity write token (also stores uploaded media/avatars on Sanity CDN) |
+| `GA4_PROPERTY_ID` | Optional | Google Analytics 4 numeric property ID |
+| `GA4_CLIENT_EMAIL` | Optional | Google Cloud service account email |
+| `GA4_PRIVATE_KEY` | Optional | Google Cloud service account private key (newlines escaped as `\n`) |
+
+### 3. Verifying After Deployment
+
+1. Visit `https://<your-vercel-domain>/api/health` — confirm `{ "ok": true, "database": "postgresql", "persistent": true }`.
+2. Visit `https://<your-vercel-domain>/admin/` and sign in with your configured administrator credentials.
+3. Refresh `/admin/dashboard/` and verify `/api/auth/me` returns `200` and sessions persist.
+
+### 4. Standalone Node Hosting (Optional)
+
+```bash
+npm run build
+npm start
+```
+
+

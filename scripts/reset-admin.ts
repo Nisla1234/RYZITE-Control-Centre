@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import readline from 'readline';
 import crypto from 'crypto';
-import { db, hashPassword, initDatabase, logAudit } from '../server/db.ts';
+import { dbGet, dbRun, ensureDatabaseReady, getDbEngine, hashPassword, logAudit } from '../server/db.ts';
 
 function promptText(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -60,7 +60,7 @@ function promptHidden(question: string): Promise<string> {
 }
 
 async function main() {
-  initDatabase();
+  await ensureDatabaseReady();
 
   let newUsername = (process.env.RESET_ADMIN_USERNAME || '').trim();
   let newPassword = process.env.RESET_ADMIN_PASSWORD || '';
@@ -90,59 +90,54 @@ async function main() {
   }
 
   const passwordHash = hashPassword(newPassword);
-  const existingAdmin = db
-    .prepare("SELECT id, username, name, email FROM admin_users WHERE role = 'super_admin' ORDER BY created_at ASC LIMIT 1")
-    .get() as { id: string; username: string; name: string; email: string } | undefined;
+  const existingAdmin = await dbGet<{ id: string; username: string; name: string; email: string }>(
+    "SELECT id, username, name, email FROM admin_users WHERE role = 'super_admin' ORDER BY created_at ASC LIMIT 1"
+  );
 
   let targetId: string;
   let targetName: string;
 
-  const tx = db.transaction(() => {
-    if (existingAdmin) {
-      targetId = existingAdmin.id;
-      targetName = newName || existingAdmin.name;
-      const targetEmail = newEmail || existingAdmin.email;
+  if (existingAdmin) {
+    targetId = existingAdmin.id;
+    targetName = newName || existingAdmin.name;
+    const targetEmail = newEmail || existingAdmin.email;
 
-      db.prepare(`
-        UPDATE admin_users
-        SET username = ?, password_hash = ?, name = ?, email = ?
-        WHERE id = ?
-      `).run(newUsername, passwordHash, targetName, targetEmail, targetId);
-    } else {
-      targetId = crypto.randomUUID();
-      targetName = newName || 'RYZITE Administrator';
-      const targetEmail = newEmail || 'admin@ryzite.com';
-      db.prepare(`
-        INSERT INTO admin_users (id, username, password_hash, name, email, role, created_at)
-        VALUES (?, ?, ?, ?, ?, 'super_admin', ?)
-      `).run(targetId, newUsername, passwordHash, targetName, targetEmail, new Date().toISOString());
-    }
+    await dbRun(
+      'UPDATE admin_users SET username = $1, password_hash = $2, name = $3, email = $4 WHERE id = $5',
+      [newUsername, passwordHash, targetName, targetEmail, targetId]
+    );
+  } else {
+    targetId = crypto.randomUUID();
+    targetName = newName || 'RYZITE Administrator';
+    const targetEmail = newEmail || 'admin@ryzite.com';
+    await dbRun(
+      `INSERT INTO admin_users (id, username, password_hash, name, email, role, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'super_admin', $6)`,
+      [targetId, newUsername, passwordHash, targetName, targetEmail, new Date().toISOString()]
+    );
+  }
 
-    // Revoke all active sessions so old sessions cannot remain logged in
-    db.prepare('DELETE FROM admin_sessions').run();
-    // Clear any brute-force rate-limit locks
-    db.prepare('DELETE FROM login_attempts').run();
+  await dbRun('DELETE FROM admin_sessions');
+  await dbRun('DELETE FROM login_attempts');
 
-    logAudit({
-      adminUsername: newUsername,
-      adminName: targetName,
-      action: 'reset_credentials',
-      contentType: 'auth',
-      recordId: targetId,
-      recordTitle: newUsername,
-      result: 'success',
-      details: 'Administrator credentials securely reset via server CLI. All prior sessions revoked.',
-      ipAddress: 'server-cli',
-    });
+  await logAudit({
+    adminUsername: newUsername,
+    adminName: targetName,
+    action: 'reset_credentials',
+    contentType: 'auth',
+    recordId: targetId,
+    recordTitle: newUsername,
+    result: 'success',
+    details: `Administrator credentials securely reset via server CLI (${getDbEngine()}). All prior sessions revoked.`,
+    ipAddress: 'server-cli',
   });
 
-  tx();
-
-  console.log('\nRYZITE Control Centre admin credentials updated successfully.');
+  console.log(`\nRYZITE Control Centre admin credentials updated successfully (${getDbEngine()}).`);
   console.log(`- New username: ${newUsername}`);
   console.log('- Password hash: updated using scrypt with a new cryptographic salt (not displayed)');
   console.log('- Active sessions revoked and login rate limits cleared.');
   console.log('- All CMS documents, media assets, audit logs, and Sanity content preserved.');
+  process.exit(0);
 }
 
 main().catch((err) => {

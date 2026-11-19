@@ -1,5 +1,5 @@
 import { createClient, type SanityClient } from '@sanity/client';
-import { db } from './db.ts';
+import { dbAll, dbGet, dbRun } from './db.ts';
 
 export const SANITY_PROJECT_ID = process.env.SANITY_PROJECT_ID || 'hnm8jy5w';
 export const SANITY_DATASET = process.env.SANITY_DATASET || 'staging';
@@ -19,7 +19,6 @@ export function getSanityClient(datasetOverride?: string): SanityClient {
   });
 }
 
-// Read-only inspection of the existing RYZITE Sanity project (never mutates production)
 export async function inspectSanityProject(): Promise<{
   projectId: string;
   dataset: string;
@@ -65,14 +64,11 @@ export async function inspectSanityProject(): Promise<{
     mode: 'local_staging',
     existingTypes,
     message: writeTokenConfigured
-      ? `Sanity write token is present, but dataset "${SANITY_DATASET}" could not be reached. Operating safely in server-side staging database mode.`
-      : `Read-only inspection connected to Sanity project "${SANITY_PROJECT_ID}". Configure SANITY_API_TOKEN in server environment variables to enable live Sanity writes. Currently persisting changes to the server-side staging database without touching production.`,
+      ? `Sanity write token is present, but dataset "${SANITY_DATASET}" could not be reached. Operating safely in database staging mode.`
+      : `Read-only inspection connected to Sanity project "${SANITY_PROJECT_ID}". Configure SANITY_API_TOKEN in server environment variables to enable live Sanity writes.`,
   };
 }
 
-// Unified server-side document repository:
-// Uses live Sanity dataset when SANITY_API_TOKEN is configured,
-// and server-side SQLite staging store otherwise (never localStorage).
 export async function listDocuments<T>(docType: string): Promise<T[]> {
   if (hasSanityWriteToken()) {
     try {
@@ -81,22 +77,24 @@ export async function listDocuments<T>(docType: string): Promise<T[]> {
         `*[_type == $docType] | order(_updatedAt desc)`,
         { docType }
       );
-      if (Array.isArray(docs)) return docs;
+      if (Array.isArray(docs) && docs.length > 0) return docs;
     } catch {
-      // Fallback to SQLite staging if staging dataset doesn't exist yet in Sanity
+      // Fallback to database staging store
     }
   }
 
-  const rows = db
-    .prepare('SELECT data_json FROM cms_documents WHERE doc_type = ? ORDER BY updated_at DESC')
-    .all(docType) as { data_json: string }[];
+  const rows = await dbAll<{ data_json: string }>(
+    'SELECT data_json FROM cms_documents WHERE doc_type = $1 ORDER BY updated_at DESC',
+    [docType]
+  );
   return rows.map((r) => JSON.parse(r.data_json) as T);
 }
 
 export async function getDocument<T>(docType: string, id: string): Promise<T | null> {
-  const row = db
-    .prepare('SELECT data_json FROM cms_documents WHERE doc_type = ? AND id = ?')
-    .get(docType, id) as { data_json: string } | undefined;
+  const row = await dbGet<{ data_json: string }>(
+    'SELECT data_json FROM cms_documents WHERE doc_type = $1 AND id = $2',
+    [docType, id]
+  );
   return row ? (JSON.parse(row.data_json) as T) : null;
 }
 
@@ -125,15 +123,16 @@ export async function saveDocument<T extends { id: string; status: string }>(
     }
   }
 
-  db.prepare(`
-    INSERT INTO cms_documents (id, doc_type, status, data_json, updated_at, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      status = excluded.status,
-      data_json = excluded.data_json,
-      updated_at = excluded.updated_at,
-      updated_by = excluded.updated_by
-  `).run(doc.id, docType, doc.status, JSON.stringify(payload), now, updatedBy);
+  await dbRun(
+    `INSERT INTO cms_documents (id, doc_type, status, data_json, updated_at, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT(id) DO UPDATE SET
+       status = EXCLUDED.status,
+       data_json = EXCLUDED.data_json,
+       updated_at = EXCLUDED.updated_at,
+       updated_by = EXCLUDED.updated_by`,
+    [doc.id, docType, doc.status, JSON.stringify(payload), now, updatedBy]
+  );
 
   return payload;
 }
@@ -149,6 +148,6 @@ export async function deleteDocument(docType: string, id: string): Promise<boole
     }
   }
 
-  const info = db.prepare('DELETE FROM cms_documents WHERE doc_type = ? AND id = ?').run(docType, id);
+  const info = await dbRun('DELETE FROM cms_documents WHERE doc_type = $1 AND id = $2', [docType, id]);
   return info.changes > 0;
 }
