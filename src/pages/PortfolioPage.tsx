@@ -452,7 +452,7 @@ export function PortfolioPage() {
               ) : filtered.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-6 py-10 text-center text-sm text-[#64748B]">
-                    No portfolio projects found.
+                    No approved project case studies are published on the current main website yet. Add a verified project here when it is ready to share.
                   </td>
                 </tr>
               ) : (
