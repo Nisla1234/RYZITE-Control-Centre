@@ -250,5 +250,4 @@ export const mainSiteSeed = {
     ['ryzite-hero-studio', 'ryzite-hero-studio.png', 'image/png', 1679333, 'https://raw.githubusercontent.com/Nisla1234/ryzite-website-development/vercel-migration/public/assets/ryzite-hero-studio.png', 'RYZITE hero studio artwork'],
     ['ryzite-logo', 'ryzite-logo.png', 'image/png', 36054, 'https://raw.githubusercontent.com/Nisla1234/ryzite-website-development/vercel-migration/public/assets/ryzite-logo.png', 'RYZITE brand logo'],
   ]
-  ]
 } as const;
