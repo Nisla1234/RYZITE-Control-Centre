@@ -42,6 +42,7 @@ import {
   saveDocument,
 } from './sanity.ts';
 import { fetchGa4Analytics, getGa4ConfigStatus } from './ga4.ts';
+import { mainSiteSeed } from './main-site-seed.ts';
 import {
   getEmailConfigStatus,
   sendAdminSecurityNotification,
@@ -1295,6 +1296,107 @@ export function createApiApp(): express.Express {
 
     const report = await fetchGa4Analytics({ preset, startDate, endDate });
     res.json(report);
+  });
+
+  // ============================================================
+  // IMPORT CURRENT MAIN-SITE CONTENT (IDEMPOTENT, SUPER-ADMIN ONLY)
+  // ============================================================
+
+  app.post('/api/content/import-main-site', requireAuth, async (req: AuthenticatedRequest, res) => {
+    if (req.adminUser?.role !== 'super_admin') {
+      res.status(403).json({ error: 'Only a super administrator can import main-site content.' });
+      return;
+    }
+
+    const imported: Record<string, number> = { page: 0, service: 0, solution: 0 };
+    const skipped: Record<string, number> = { page: 0, service: 0, solution: 0 };
+    const now = new Date().toISOString();
+
+    const importRecords = async (docType: 'page' | 'service' | 'solution', records: any[]) => {
+      const existing = await listDocuments<any>(docType);
+      const existingSlugs = new Set(existing.map((item) => String(item.slug || '').replace(/\\/$/, '') || '/'));
+      for (const record of records) {
+        const normalizedSlug = String(record.slug || '').replace(/\\/$/, '') || '/';
+        if (existingSlugs.has(normalizedSlug) || existing.some((item) => item.id === record.id)) {
+          skipped[docType] += 1;
+          continue;
+        }
+        const payload = {
+          ...record,
+          status: 'published',
+          publishedAt: now,
+          updatedAt: now,
+          updatedBy: req.adminUser!.username,
+        };
+        await saveDocument(docType, payload, req.adminUser!.username);
+        existingSlugs.add(normalizedSlug);
+        imported[docType] += 1;
+      }
+    };
+
+    const pageRecords = mainSiteSeed.pages.map((page) => ({
+      ...page,
+      seo: {
+        metaTitle: page.metaTitle,
+        metaDescription: page.metaDescription,
+        canonicalUrl: `https://ryzite-main-site-nisla1234.vercel.app${page.slug === '/' ? '/' : page.slug}`,
+        ogTitle: page.metaTitle,
+        ogDescription: page.metaDescription,
+        noIndex: false,
+      },
+    }));
+
+    const makeOffering = (kind: 'service' | 'solution', item: readonly [string, string, string]) => {
+      const [title, summary, featureText] = item;
+      const slug = title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const metaTitle = `${title} | RYZITE`;
+      return {
+        id: `main-site-${kind}-${slug}`,
+        type: kind,
+        title,
+        slug,
+        category: kind === 'service' ? 'Marketing Services' : 'Technology Solutions',
+        summary,
+        description: summary,
+        iconName: kind === 'service' ? 'Megaphone' : 'Code2',
+        imageUrl: '',
+        imageAlt: '',
+        features: featureText.split(';').map((value) => value.trim()).filter(Boolean),
+        benefits: [],
+        ctaText: 'Get a Quote',
+        ctaUrl: '/contact/',
+        displayOrder: 0,
+        status: 'published',
+        seo: { metaTitle, metaDescription: summary },
+        updatedAt: now,
+        updatedBy: req.adminUser!.username,
+        source: 'main-site',
+      };
+    };
+
+    await importRecords('page', pageRecords);
+    await importRecords('service', mainSiteSeed.services.map((item, index) => ({ ...makeOffering('service', item), displayOrder: index + 1 })));
+    await importRecords('solution', mainSiteSeed.solutions.map((item, index) => ({ ...makeOffering('solution', item), displayOrder: index + 1 })));
+
+    const totalImported = Object.values(imported).reduce((sum, count) => sum + count, 0);
+    await logAudit({
+      adminUsername: req.adminUser!.username,
+      adminName: req.adminUser!.name,
+      action: 'import_main_site',
+      contentType: 'cms',
+      recordId: 'main-site-import',
+      recordTitle: 'Main website content import',
+      result: 'success',
+      details: `Imported ${totalImported} current main-site records. Added: ${JSON.stringify(imported)}. Preserved existing records: ${JSON.stringify(skipped)}.`,
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({
+      ok: true,
+      imported,
+      skipped,
+      note: 'This imports a snapshot of the current main-site source content into the Control Centre CMS. It does not yet publish CMS edits back to the static main website.',
+    });
   });
 
   // ============================================================
