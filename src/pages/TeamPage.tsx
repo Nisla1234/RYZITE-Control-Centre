@@ -254,7 +254,7 @@ export function TeamPage() {
         {loading ? (
           <div className="col-span-full py-12 text-center text-sm text-[#64748B]">Loading team...</div>
         ) : items.length === 0 ? (
-          <div className="col-span-full py-12 text-center text-sm text-[#64748B]">No team members yet.</div>
+          <div className="col-span-full py-12 text-center text-sm text-[#64748B]">No team profiles are published on the current main website. Add verified staff profiles here when they are approved for publication.</div>
         ) : (
           items.map((member) => (
             <div key={member.id} className="rounded-xl border border-[#DDE5F0] bg-white p-5 flex flex-col justify-between">
