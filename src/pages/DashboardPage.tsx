@@ -125,9 +125,19 @@ export function DashboardPage() {
         imported: Record<string, number>;
         skipped: Record<string, number>;
       }>('/api/content/import-main-site', { method: 'POST', body: JSON.stringify({}) });
+      const labels: Record<string, string> = {
+        page: 'Pages',
+        service: 'Services',
+        solution: 'Solutions',
+        article: 'Article drafts',
+        media: 'Media assets',
+      };
+      const breakdown = Object.entries(result.imported)
+        .map(([key, count]) => `${labels[key] || key}: ${count}`)
+        .join(' · ');
       const added = Object.values(result.imported).reduce((sum, count) => sum + count, 0);
       const preserved = Object.values(result.skipped).reduce((sum, count) => sum + count, 0);
-      setMainSiteImportMessage(`Imported ${added} new records; preserved ${preserved} existing records.`);
+      setMainSiteImportMessage(`Imported ${added} records (${breakdown}). Preserved ${preserved} existing records. Portfolio, Team and Testimonials have no approved source entries to import.`);
       await loadOverview();
     } catch (err: any) {
       setMainSiteImportMessage(err.message || 'Main-site import failed.');
