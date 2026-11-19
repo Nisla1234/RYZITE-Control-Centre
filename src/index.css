@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* RYZITE Brand Palette — Derived from Official RYZITE Logo */
+  --color-ryzite-navy: #0D1F4E;
+  --color-ryzite-sidebar: #13254D;
+  --color-ryzite-sidebar-hover: #1B3266;
+  --color-ryzite-cobalt: #1438B8;
+  --color-ryzite-cobalt-hover: #102D96;
+  --color-ryzite-azure: #2563EB;
+  --color-ryzite-ice: #EEF3FC;
+  --color-ryzite-canvas: #F4F7FC;
+  --color-ryzite-border: #DDE5F0;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-ryzite-canvas);
+    color: #0F172A;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbars for admin tables and sidebar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(13, 31, 78, 0.16);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(13, 31, 78, 0.28);
+}

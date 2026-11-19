@@ -1,0 +1,6 @@
+{
+  "name": "RYZITE Control Centre",
+  "description": "Enterprise Website Content Management System for RYZITE with Sanity CMS integration, Google Analytics 4 reporting, structured page editing, media library, SEO centre, and server-side audit logging.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
