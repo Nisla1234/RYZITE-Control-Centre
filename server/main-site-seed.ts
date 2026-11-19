@@ -69,6 +69,64 @@ export const mainSiteSeed = {
         { id: 'contact-cta', type: 'cta', ctaHeading: 'Start a Conversation', ctaBody: 'Tell us what you need and about your project.', ctaButtonText: 'Contact RYZITE', ctaButtonUrl: '/contact/#project-enquiry' }
       ]
     }
+,
+    {
+      id: 'main-site-how-we-work',
+      title: 'How We Work',
+      slug: '/how-we-work/',
+      summary: 'Learn about the RYZITE project process, from discovery and planning through design, development, testing, and launch.',
+      metaTitle: 'How We Work | RYZITE Digital Solutions',
+      metaDescription: 'Learn about the RYZITE project process, from discovery and planning through design, development, testing, and launch.',
+      blocks: [
+        { id: 'process-h1', type: 'heading', level: 1, text: 'A Clear Process. A Better Digital Experience.' },
+        { id: 'process-intro', type: 'paragraph', text: 'Great digital solutions begin with understanding the right problems.' },
+        { id: 'process-detail', type: 'paragraph', text: 'At RYZITE, we follow a structured approach to understand business requirements, plan suitable solutions, and deliver digital experiences aligned with project goals.' },
+        { id: 'process-steps', type: 'heading', level: 2, text: 'From First Conversation to Final Launch.' },
+        { id: 'process-cta', type: 'cta', ctaHeading: 'Ready to Turn Your Ideas Into Reality?', ctaBody: 'Let’s discuss your goals and explore the right approach for your next digital project.', ctaButtonText: 'Start a Project', ctaButtonUrl: '/contact/' }
+      ]
+    },
+    {
+      id: 'main-site-our-work',
+      title: 'Our Work',
+      slug: '/our-work/',
+      summary: 'Explore RYZITE project work and digital experiences. Approved project case studies will be shared here when available.',
+      metaTitle: 'Our Work | RYZITE Projects & Digital Experiences',
+      metaDescription: 'Explore RYZITE project work and digital experiences. Approved project case studies will be shared here when available.',
+      blocks: [
+        { id: 'work-h1', type: 'heading', level: 1, text: 'Ideas Transformed Into Digital Experiences.' },
+        { id: 'work-intro', type: 'paragraph', text: 'Every digital project begins with a challenge, an idea, or an opportunity to improve how a business connects with its customers.' },
+        { id: 'work-detail', type: 'paragraph', text: 'Our approach brings thoughtful design, practical technology, and business-focused problem-solving together.' },
+        { id: 'work-empty', type: 'paragraph', text: 'There are no approved project case studies to display at this time. Project details will be added when they are ready to share.' }
+      ]
+    },
+    {
+      id: 'main-site-articles',
+      title: 'RYZITE Insights',
+      slug: '/articles/',
+      summary: 'Explore RYZITE perspectives on technology, digital marketing, website development, design, automation, and business solutions.',
+      metaTitle: 'RYZITE Insights | Technology, Marketing & Design',
+      metaDescription: 'Explore RYZITE perspectives on technology, digital marketing, website development, design, automation, and business solutions.',
+      blocks: [
+        { id: 'articles-h1', type: 'heading', level: 1, text: 'Ideas, Insights & Digital Perspectives.' },
+        { id: 'articles-intro', type: 'paragraph', text: 'Explore useful perspectives on technology, digital marketing, website development, design, automation, and modern business solutions.' },
+        { id: 'articles-detail', type: 'paragraph', text: 'This section is intended to help businesses understand digital opportunities, emerging tools, and practical approaches to growth.' },
+        { id: 'articles-empty', type: 'paragraph', text: 'There are no published articles to display at this time. Editorial topic ideas on the live website are drafts, not published articles.' }
+      ]
+    },
+    {
+      id: 'main-site-packages',
+      title: 'RYZITE Packages',
+      slug: '/packages/',
+      summary: 'Explore proposed RYZITE digital package options. Discuss your requirements, possible features, and project scope with our team.',
+      metaTitle: 'RYZITE Packages | Digital Solutions for Your Business',
+      metaDescription: 'Explore proposed RYZITE digital package options. Discuss your requirements, possible features, and project scope with our team.',
+      blocks: [
+        { id: 'packages-h1', type: 'heading', level: 1, text: 'Flexible Digital Solutions for Every Stage of Business.' },
+        { id: 'packages-intro', type: 'paragraph', text: 'Every business has different goals, requirements, and budgets. At RYZITE, we believe digital solutions should be tailored to what your business actually needs.' },
+        { id: 'packages-detail', type: 'paragraph', text: 'Our package options are intended to help businesses explore possible features and find a suitable starting point for a digital project.' },
+        { id: 'packages-disclaimer', type: 'paragraph', text: 'Package names, descriptions, and feature areas are proposals for discussion, not approved inclusions. No fixed prices or delivery terms are published. Project scope and pricing must be confirmed before any engagement.' }
+      ]
+    },
   ],
   services: [
     ['Google SEO & Search Visibility', 'Help your business get found in search.', 'Search presence review; Search topic planning; On-page content guidance; Review and refinement'],
