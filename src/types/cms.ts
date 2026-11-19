@@ -154,7 +154,7 @@ export interface MediaAsset {
   sizeBytes: number;
   url: string;
   altText: string;
-  source: 'sanity' | 'local';
+  source: 'sanity' | 'local' | 'main-site';
   uploadedBy: string;
   uploadedAt: string;
 }
