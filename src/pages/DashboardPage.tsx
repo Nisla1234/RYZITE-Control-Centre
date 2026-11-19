@@ -75,6 +75,8 @@ export function DashboardPage() {
   const [customEnd, setCustomEnd] = useState('');
   const [loading, setLoading] = useState(true);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  const [importingMainSite, setImportingMainSite] = useState(false);
+  const [mainSiteImportMessage, setMainSiteImportMessage] = useState('');
 
   const loadOverview = async () => {
     setLoading(true);
@@ -113,6 +115,26 @@ export function DashboardPage() {
     loadOverview();
     loadAnalytics('30d');
   }, []);
+
+  const importMainSiteContent = async () => {
+    if (importingMainSite) return;
+    setImportingMainSite(true);
+    setMainSiteImportMessage('');
+    try {
+      const result = await apiRequest<{
+        imported: Record<string, number>;
+        skipped: Record<string, number>;
+      }>('/api/content/import-main-site', { method: 'POST', body: JSON.stringify({}) });
+      const added = Object.values(result.imported).reduce((sum, count) => sum + count, 0);
+      const preserved = Object.values(result.skipped).reduce((sum, count) => sum + count, 0);
+      setMainSiteImportMessage(`Imported ${added} new records; preserved ${preserved} existing records.`);
+      await loadOverview();
+    } catch (err: any) {
+      setMainSiteImportMessage(err.message || 'Main-site import failed.');
+    } finally {
+      setImportingMainSite(false);
+    }
+  };
 
   const handlePresetClick = (p: AnalyticsDateRange['preset']) => {
     setPreset(p);
@@ -193,8 +215,23 @@ export function DashboardPage() {
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </button>
+          <button
+            type="button"
+            onClick={importMainSiteContent}
+            disabled={importingMainSite}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#102D96] disabled:opacity-60"
+          >
+            <Database className="h-3.5 w-3.5" />
+            {importingMainSite ? 'Importing...' : 'Import Main Site'}
+          </button>
         </div>
       </div>
+
+      {mainSiteImportMessage && (
+        <p role="status" className="rounded-lg border border-[#DDE5F0] bg-white px-4 py-2 text-xs text-[#334155]">
+          {mainSiteImportMessage}
+        </p>
+      )}
 
       {/* Top Hero Split — Inspired by Reference Image 2 (Deep RYZITE Navy Summary + Chart / Status Area) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
