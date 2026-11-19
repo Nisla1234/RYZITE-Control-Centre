@@ -23,7 +23,7 @@ export function getClientIp(req: Request): string {
   return req.socket?.remoteAddress || 'unknown';
 }
 
-function hashToken(rawToken: string): string {
+export function hashToken(rawToken: string): string {
   const secret = process.env.SESSION_SECRET || 'ryzite-dev-session-secret-change-in-production';
   return crypto.createHmac('sha256', secret).update(rawToken).digest('hex');
 }

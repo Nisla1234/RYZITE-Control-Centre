@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { Lock, User, Eye, EyeOff, AlertCircle, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { ApiError } from '../lib/api';
@@ -132,12 +132,20 @@ export function LoginPage() {
               </div>
 
               <div>
-                <label
-                  htmlFor="login-password"
-                  className="block text-sm font-medium text-[#1E293B] mb-1.5"
-                >
-                  Password
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label
+                    htmlFor="login-password"
+                    className="block text-sm font-medium text-[#1E293B]"
+                  >
+                    Password
+                  </label>
+                  <Link
+                    to="/admin/forgot-password"
+                    className="text-xs font-semibold text-[#1438B8] hover:text-[#0D1F4E]"
+                  >
+                    Forgot password?
+                  </Link>
+                </div>
                 <div className="relative">
                   <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64748B]" />
                   <input
@@ -171,7 +179,17 @@ export function LoginPage() {
               </button>
             </form>
 
-            <div className="mt-6 pt-5 border-t border-[#E2E8F0] text-xs text-[#64748B] leading-relaxed">
+            <div className="mt-5 flex items-center justify-between text-xs">
+              <span className="text-[#64748B]">Need administrator access?</span>
+              <Link
+                to="/admin/request-access"
+                className="font-semibold text-[#1438B8] hover:text-[#0D1F4E]"
+              >
+                Request Admin Access
+              </Link>
+            </div>
+
+            <div className="mt-5 pt-5 border-t border-[#E2E8F0] text-xs text-[#64748B] leading-relaxed">
               Access is restricted to authorised RYZITE administrators. Failed login attempts are
               rate-limited and recorded in the server-side security audit log.
             </div>

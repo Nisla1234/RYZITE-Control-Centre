@@ -9,6 +9,7 @@ import {
   Upload,
   Trash2,
   Lock,
+  Mail,
 } from 'lucide-react';
 import { apiRequest, formatDateTime } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
@@ -16,6 +17,7 @@ import { StatusText } from '../components/ui/StatusText';
 import { AdminAvatar } from '../components/ui/AdminAvatar';
 import { AvatarCropModal } from '../components/ui/AvatarCropModal';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
+import { AccessRequestsPanel } from '../components/settings/AccessRequestsPanel';
 import type { AdminUser, GlobalSeoSettings, IntegrationStatus } from '../types/cms';
 
 const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -510,6 +512,26 @@ export function SettingsPage() {
               </div>
               <p className="text-xs text-[#475569] leading-relaxed">{status?.ga4.message}</p>
             </div>
+
+            <div className="space-y-2 pt-4 border-t border-[#E2E8F0]">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#0F172A]">
+                  <Mail className="h-4 w-4 text-[#1438B8]" />
+                  Security Email Delivery (Resend)
+                </span>
+                <StatusText
+                  status={status?.email?.configured ? 'connected' : 'warning'}
+                  label={status?.email?.configured ? 'Configured' : 'Not Configured'}
+                />
+              </div>
+              <div className="text-xs font-mono text-[#475569] bg-[#F8FAFD] p-3 rounded-lg border border-[#E2E8F0] space-y-1">
+                <div>Alerts To: {(status?.email?.notificationRecipients || ['info@ryzite.lk', 'nislaryzite@gmail.com']).join(', ')}</div>
+                <div>Sender: {status?.email?.fromAddress || 'Not Set (EMAIL_FROM)'}</div>
+              </div>
+              <p className="text-xs text-[#475569] leading-relaxed">
+                {status?.email?.message || 'Configure RESEND_API_KEY and EMAIL_FROM in Vercel Environment Variables.'}
+              </p>
+            </div>
           </div>
 
           <form onSubmit={handleSaveSession} className="rounded-xl border border-[#DDE5F0] bg-white p-6 space-y-4">
@@ -549,6 +571,8 @@ export function SettingsPage() {
               </button>
             </div>
           </form>
+
+          {user?.role === 'super_admin' && <AccessRequestsPanel />}
         </div>
       </div>
 

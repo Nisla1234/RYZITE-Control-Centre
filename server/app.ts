@@ -10,6 +10,7 @@ import {
   dbGet,
   dbRun,
   ensureDatabaseReady,
+  getCredentialSyncStatus,
   getDatabaseStatus,
   hashPassword,
   logAudit,
@@ -24,8 +25,10 @@ import {
   extractSessionToken,
   getClientIp,
   getSessionTtlHours,
+  hashToken,
   recordFailedLogin,
   requireAuth,
+  requireRole,
   revokeSession,
   setSessionCookie,
 } from './auth.ts';
@@ -39,6 +42,11 @@ import {
   saveDocument,
 } from './sanity.ts';
 import { fetchGa4Analytics, getGa4ConfigStatus } from './ga4.ts';
+import {
+  getEmailConfigStatus,
+  sendAdminSecurityNotification,
+  sendPasswordResetEmail,
+} from './email.ts';
 import type {
   AnalyticsDateRange,
   GlobalSeoSettings,
@@ -196,13 +204,23 @@ export function createApiApp(): express.Express {
     }
   });
 
-  // Public health check (exposes no secrets)
+  // Public health check (exposes no secrets, usernames, or credentials)
   app.get('/api/health', async (_req, res) => {
     const dbStatus = await getDatabaseStatus();
+    let adminConfigured = false;
+    let adminCount = 0;
+    if (dbStatus.connected) {
+      const countRow = await dbGet<{ count: string | number }>('SELECT COUNT(*) as count FROM admin_users');
+      adminCount = Number(countRow?.count || 0);
+      adminConfigured = adminCount > 0;
+    }
     res.status(dbStatus.connected ? 200 : 503).json({
       ok: dbStatus.connected,
       database: dbStatus.engine,
       persistent: dbStatus.persistent,
+      adminConfigured,
+      adminCount,
+      credentialSyncStatus: getCredentialSyncStatus(),
     });
   });
 
@@ -235,6 +253,16 @@ export function createApiApp(): express.Express {
           details: `Too many failed login attempts. Retry after ${rate.retryAfterSec}s.`,
           ipAddress: ip,
         });
+        void sendAdminSecurityNotification({
+          eventTitle: 'Login Lockout Triggered',
+          summary: `Multiple failed sign-in attempts triggered a temporary lockout for username "${username}".`,
+          fields: [
+            { label: 'Target Username', value: username },
+            { label: 'Source IP', value: ip },
+            { label: 'Retry Window', value: `${Math.ceil(rate.retryAfterSec / 60)} minute(s)` },
+            { label: 'Timestamp (UTC)', value: new Date().toISOString() },
+          ],
+        });
         res.status(429).json({
           error: `Too many failed login attempts. Please wait ${Math.ceil(rate.retryAfterSec / 60)} minute(s) before trying again.`,
         });
@@ -242,7 +270,7 @@ export function createApiApp(): express.Express {
       }
 
       const userRow = await dbGet<any>(
-        'SELECT * FROM admin_users WHERE lower(username) = lower($1)',
+        'SELECT * FROM admin_users WHERE lower(trim(username)) = lower($1) OR lower(trim(email)) = lower($1) LIMIT 1',
         [username]
       );
 
@@ -590,8 +618,574 @@ export function createApiApp(): express.Express {
       ipAddress: getClientIp(req),
     });
 
+    void sendAdminSecurityNotification({
+      eventTitle: 'Administrator Password Changed',
+      summary: `Administrator "${req.adminUser!.username}" changed their account password from Control Centre settings.`,
+      fields: [
+        { label: 'Username', value: req.adminUser!.username },
+        { label: 'Email', value: req.adminUser!.email },
+        { label: 'Source IP', value: getClientIp(req) },
+        { label: 'Timestamp (UTC)', value: new Date().toISOString() },
+      ],
+    });
+
     res.json({ ok: true });
   });
+
+  // ============================================================
+  // FORGOT PASSWORD & SINGLE-USE 15-MINUTE RESET FLOW
+  // ============================================================
+
+  function getAppOrigin(req: express.Request): string {
+    const envUrl = (process.env.APP_URL || '').trim().replace(/\/$/, '');
+    if (envUrl && /^https?:\/\//i.test(envUrl)) return envUrl;
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+      .split(',')[0]
+      .trim();
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000')
+      .split(',')[0]
+      .trim();
+    return `${proto}://${host}`;
+  }
+
+  function validateStrongPassword(password: string): string | null {
+    if (password.length < 10) return 'Password must be at least 10 characters long.';
+    if (!/[A-Z]/.test(password) || !/[a-z]/.test(password)) {
+      return 'Password must include both uppercase and lowercase letters.';
+    }
+    if (!/[0-9!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) {
+      return 'Password must include at least one number or special character.';
+    }
+    return null;
+  }
+
+  app.post('/api/auth/forgot-password', async (req, res) => {
+    const genericMessage =
+      'If an administrator account is registered with that email address, a password reset link has been sent. The link expires in 15 minutes.';
+
+    try {
+      const ip = getClientIp(req);
+      const email = sanitizeString(req.body?.email, 180).toLowerCase();
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Please enter a valid email address.' });
+        return;
+      }
+
+      const ipRate = await checkLoginRateLimit(`forgot-ip:${ip}`);
+      const emailRate = await checkLoginRateLimit(`forgot-email:${email}`);
+      if (!ipRate.allowed || !emailRate.allowed) {
+        const retry = Math.max(ipRate.retryAfterSec, emailRate.retryAfterSec);
+        res.status(429).json({
+          error: `Too many password recovery requests. Please wait ${Math.ceil(retry / 60)} minute(s) before trying again.`,
+        });
+        return;
+      }
+
+      await recordFailedLogin(`forgot-ip:${ip}`);
+      await recordFailedLogin(`forgot-email:${email}`);
+
+      // Clean up expired tokens globally
+      const nowIso = new Date().toISOString();
+      await dbRun('DELETE FROM password_reset_tokens WHERE expires_at <= $1 OR used_at IS NOT NULL', [nowIso]);
+
+      const userRow = await dbGet<{
+        id: string;
+        username: string;
+        name: string;
+        email: string;
+      }>('SELECT id, username, name, email FROM admin_users WHERE lower(email) = lower($1) LIMIT 1', [email]);
+
+      if (userRow) {
+        // Invalidate any prior unused tokens for this user
+        await dbRun('DELETE FROM password_reset_tokens WHERE user_id = $1', [userRow.id]);
+
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        const tokenHash = hashToken(rawToken);
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+        await dbRun(
+          `INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, requested_ip, created_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [tokenHash, userRow.id, expiresAt, ip, nowIso]
+        );
+
+        const resetUrl = `${getAppOrigin(req)}/admin/reset-password?token=${encodeURIComponent(rawToken)}`;
+
+        const emailResult = await sendPasswordResetEmail({
+          to: userRow.email,
+          adminName: userRow.name,
+          resetUrl,
+          expiresMinutes: 15,
+          ipAddress: ip,
+        });
+
+        await sendAdminSecurityNotification({
+          eventTitle: 'Password Recovery Requested',
+          summary: `A password reset link was requested for administrator "${userRow.username}".`,
+          fields: [
+            { label: 'Administrator', value: `${userRow.name} (${userRow.username})` },
+            { label: 'Registered Email', value: userRow.email },
+            { label: 'Source IP', value: ip },
+            { label: 'Token Expiry', value: '15 minutes (single-use, hashed in PostgreSQL)' },
+            { label: 'Email Delivery', value: emailResult.sent ? 'Delivered via Resend' : `Not sent (${emailResult.error || 'unconfigured'})` },
+          ],
+        });
+
+        await logAudit({
+          adminUsername: userRow.username,
+          adminName: userRow.name,
+          action: 'password_reset_requested',
+          contentType: 'auth',
+          recordId: userRow.id,
+          recordTitle: userRow.username,
+          result: emailResult.sent ? 'success' : 'failure',
+          details: emailResult.sent
+            ? 'Password reset token generated (15-min expiry) and emailed to registered address.'
+            : `Password reset token generated, but email delivery failed: ${emailResult.error || 'provider unconfigured'}.`,
+          ipAddress: ip,
+        });
+      } else {
+        await logAudit({
+          adminUsername: 'anonymous',
+          adminName: 'Unregistered Email',
+          action: 'password_reset_requested',
+          contentType: 'auth',
+          recordId: 'unregistered',
+          recordTitle: 'Password recovery check',
+          result: 'failure',
+          details: 'Password reset requested for an email address with no matching admin account (no account existence revealed).',
+          ipAddress: ip,
+        });
+      }
+
+      // Never reveal whether the email belongs to an administrator account
+      res.json({ ok: true, message: genericMessage });
+    } catch (err: any) {
+      console.error('[Forgot Password Error]', err);
+      res.status(500).json({ error: 'Unable to process password recovery request right now.' });
+    }
+  });
+
+  app.get('/api/auth/reset-password/validate', async (req, res) => {
+    try {
+      const rawToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+      if (!rawToken || rawToken.length < 32) {
+        res.status(400).json({ valid: false, error: 'This password reset link is invalid or has expired.' });
+        return;
+      }
+
+      const tokenHash = hashToken(rawToken);
+      const row = await dbGet<{ expires_at: string; used_at: string | null }>(
+        'SELECT expires_at, used_at FROM password_reset_tokens WHERE token_hash = $1',
+        [tokenHash]
+      );
+
+      if (!row || row.used_at || new Date(row.expires_at).getTime() <= Date.now()) {
+        res.status(400).json({ valid: false, error: 'This password reset link is invalid or has expired.' });
+        return;
+      }
+
+      res.json({ valid: true, expiresAt: row.expires_at });
+    } catch (err: any) {
+      console.error('[Validate Reset Token Error]', err);
+      res.status(500).json({ valid: false, error: 'Unable to validate reset link.' });
+    }
+  });
+
+  app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+      const ip = getClientIp(req);
+      const rate = await checkLoginRateLimit(`reset-ip:${ip}`);
+      if (!rate.allowed) {
+        res.status(429).json({
+          error: `Too many reset attempts. Please wait ${Math.ceil(rate.retryAfterSec / 60)} minute(s).`,
+        });
+        return;
+      }
+
+      const rawToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+      const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+
+      if (!rawToken || rawToken.length < 32) {
+        await recordFailedLogin(`reset-ip:${ip}`);
+        res.status(400).json({ error: 'Invalid or expired password reset token.' });
+        return;
+      }
+
+      const passwordError = validateStrongPassword(newPassword);
+      if (passwordError) {
+        res.status(400).json({ error: passwordError });
+        return;
+      }
+
+      const tokenHash = hashToken(rawToken);
+      const tokenRow = await dbGet<{
+        token_hash: string;
+        user_id: string;
+        expires_at: string;
+        used_at: string | null;
+      }>('SELECT token_hash, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = $1', [
+        tokenHash,
+      ]);
+
+      if (!tokenRow || tokenRow.used_at || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+        await recordFailedLogin(`reset-ip:${ip}`);
+        if (tokenRow) {
+          await dbRun('DELETE FROM password_reset_tokens WHERE token_hash = $1', [tokenHash]);
+        }
+        res.status(400).json({ error: 'This password reset link is invalid or has expired.' });
+        return;
+      }
+
+      const userRow = await dbGet<{ id: string; username: string; name: string; email: string }>(
+        'SELECT id, username, name, email FROM admin_users WHERE id = $1',
+        [tokenRow.user_id]
+      );
+      if (!userRow) {
+        await dbRun('DELETE FROM password_reset_tokens WHERE token_hash = $1', [tokenHash]);
+        res.status(400).json({ error: 'This password reset link is invalid or has expired.' });
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const nextHash = hashPassword(newPassword);
+
+      await dbRun('UPDATE admin_users SET password_hash = $1 WHERE id = $2', [nextHash, userRow.id]);
+      await dbRun('UPDATE password_reset_tokens SET used_at = $1 WHERE token_hash = $2', [nowIso, tokenHash]);
+      await dbRun('DELETE FROM password_reset_tokens WHERE user_id = $1', [userRow.id]);
+      await dbRun('DELETE FROM admin_sessions WHERE user_id = $1', [userRow.id]);
+      await dbRun('DELETE FROM login_attempts WHERE identifier LIKE $1', [`%:${userRow.username.toLowerCase()}`]);
+      await clearFailedLogins(`reset-ip:${ip}`);
+
+      await logAudit({
+        adminUsername: userRow.username,
+        adminName: userRow.name,
+        action: 'password_reset_completed',
+        contentType: 'auth',
+        recordId: userRow.id,
+        recordTitle: userRow.username,
+        result: 'success',
+        details: 'Administrator password reset completed via single-use token. All prior sessions revoked.',
+        ipAddress: ip,
+      });
+
+      await sendAdminSecurityNotification({
+        eventTitle: 'Administrator Password Reset Completed',
+        summary: `The password for administrator "${userRow.username}" was successfully reset using a single-use recovery link.`,
+        fields: [
+          { label: 'Administrator', value: `${userRow.name} (${userRow.username})` },
+          { label: 'Email', value: userRow.email },
+          { label: 'Source IP', value: ip },
+          { label: 'Sessions', value: 'All previous sessions revoked' },
+          { label: 'Timestamp (UTC)', value: nowIso },
+        ],
+      });
+
+      res.json({ ok: true, message: 'Your password has been updated. You can now sign in with your new password.' });
+    } catch (err: any) {
+      console.error('[Reset Password Error]', err);
+      res.status(500).json({ error: 'Unable to reset password right now.' });
+    }
+  });
+
+  // ============================================================
+  // ADMIN SIGNUP / ACCESS REQUESTS (SUPER_ADMIN APPROVAL REQUIRED)
+  // ============================================================
+
+  app.post('/api/auth/signup-request', async (req, res) => {
+    try {
+      const ip = getClientIp(req);
+      const rate = await checkLoginRateLimit(`signup-req:${ip}`);
+      if (!rate.allowed) {
+        res.status(429).json({
+          error: `Too many access requests from this address. Please wait ${Math.ceil(rate.retryAfterSec / 60)} minute(s).`,
+        });
+        return;
+      }
+
+      const fullName = sanitizeString(req.body?.fullName, 120);
+      const email = sanitizeString(req.body?.email, 180).toLowerCase();
+      const reason = sanitizeString(req.body?.reason, 1000);
+
+      if (fullName.length < 2) {
+        res.status(400).json({ error: 'Please enter your full name (at least 2 characters).' });
+        return;
+      }
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Please enter a valid work email address.' });
+        return;
+      }
+      if (reason.length < 10) {
+        res.status(400).json({ error: 'Please provide a brief reason for requesting administrator access (at least 10 characters).' });
+        return;
+      }
+
+      await recordFailedLogin(`signup-req:${ip}`);
+
+      const existingPending = await dbGet<{ id: string }>(
+        "SELECT id FROM admin_access_requests WHERE lower(email) = lower($1) AND status = 'pending' LIMIT 1",
+        [email]
+      );
+      if (existingPending) {
+        res.status(409).json({
+          error: 'An administrator access request for this email is already pending review.',
+        });
+        return;
+      }
+
+      const id = crypto.randomUUID();
+      const nowIso = new Date().toISOString();
+
+      await dbRun(
+        `INSERT INTO admin_access_requests (id, full_name, email, reason, status, requested_ip, created_at)
+         VALUES ($1, $2, $3, $4, 'pending', $5, $6)`,
+        [id, fullName, email, reason, ip, nowIso]
+      );
+
+      const reviewUrl = `${getAppOrigin(req)}/admin/settings/`;
+      const emailResult = await sendAdminSecurityNotification({
+        eventTitle: 'New Administrator Access Request',
+        summary: `${fullName} (${email}) has requested administrator access to RYZITE Control Centre. No account has been created automatically — a super_admin must approve or reject this request.`,
+        fields: [
+          { label: 'Applicant Name', value: fullName },
+          { label: 'Applicant Email', value: email },
+          { label: 'Reason for Access', value: reason },
+          { label: 'Source IP', value: ip },
+          { label: 'Submitted (UTC)', value: nowIso },
+        ],
+        actionUrl: reviewUrl,
+        actionLabel: 'Review Request in Control Centre',
+      });
+
+      await logAudit({
+        adminUsername: email,
+        adminName: fullName,
+        action: 'access_request_submitted',
+        contentType: 'auth',
+        recordId: id,
+        recordTitle: `${fullName} <${email}>`,
+        result: 'success',
+        details: `Admin access request submitted (pending super_admin review). Notification email: ${emailResult.sent ? 'sent' : 'not sent'}.`,
+        ipAddress: ip,
+      });
+
+      res.status(201).json({
+        ok: true,
+        message:
+          'Your administrator access request has been submitted and sent to RYZITE super administrators for review. No account is created until approved.',
+      });
+    } catch (err: any) {
+      console.error('[Signup Request Error]', err);
+      res.status(500).json({ error: 'Unable to submit access request right now.' });
+    }
+  });
+
+  app.get(
+    '/api/admin/access-requests',
+    requireAuth,
+    requireRole('super_admin'),
+    async (_req: AuthenticatedRequest, res) => {
+      const rows = await dbAll<any>(
+        `SELECT * FROM admin_access_requests
+         ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC, created_at DESC`
+      );
+      res.json({
+        items: rows.map((r) => ({
+          id: r.id,
+          fullName: r.full_name,
+          email: r.email,
+          reason: r.reason,
+          status: r.status,
+          reviewedBy: r.reviewed_by || null,
+          reviewedAt: r.reviewed_at || null,
+          reviewNotes: r.review_notes || null,
+          createdAdminId: r.created_admin_id || null,
+          requestedIp: r.requested_ip,
+          createdAt: r.created_at,
+        })),
+      });
+    }
+  );
+
+  app.post(
+    '/api/admin/access-requests/:id/approve',
+    requireAuth,
+    requireRole('super_admin'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { id } = req.params;
+        const reviewer = req.adminUser!;
+        const ip = getClientIp(req);
+
+        const requestRow = await dbGet<any>('SELECT * FROM admin_access_requests WHERE id = $1', [id]);
+        if (!requestRow) {
+          res.status(404).json({ error: 'Access request not found.' });
+          return;
+        }
+        if (requestRow.status !== 'pending') {
+          res.status(400).json({ error: `This access request has already been ${requestRow.status}.` });
+          return;
+        }
+
+        const username = sanitizeString(req.body?.username, 64);
+        const roleInput = sanitizeString(req.body?.role || 'admin', 32);
+        const reviewNotes = sanitizeString(req.body?.reviewNotes || '', 500);
+        const role = roleInput === 'editor' ? 'editor' : 'admin';
+
+        if (!/^[a-zA-Z0-9._-]{3,64}$/.test(username)) {
+          res.status(400).json({
+            error: 'Username must be 3–64 characters using letters, numbers, ".", "_", or "-".',
+          });
+          return;
+        }
+
+        const dupUser = await dbGet(
+          'SELECT id FROM admin_users WHERE lower(username) = lower($1) OR lower(email) = lower($2) LIMIT 1',
+          [username, requestRow.email]
+        );
+        if (dupUser) {
+          res.status(409).json({
+            error: 'An administrator account with this username or email already exists.',
+          });
+          return;
+        }
+
+        const newAdminId = crypto.randomUUID();
+        const nowIso = new Date().toISOString();
+        // Random unguessable scrypt hash; user sets their own password via single-use 15-min link
+        const unguessableHash = hashPassword(crypto.randomBytes(32).toString('hex'));
+
+        await dbRun(
+          `INSERT INTO admin_users (id, username, password_hash, name, email, role, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [newAdminId, username, unguessableHash, requestRow.full_name, requestRow.email, role, nowIso]
+        );
+
+        await dbRun(
+          `UPDATE admin_access_requests
+           SET status = 'approved', reviewed_by = $1, reviewed_at = $2, review_notes = $3, created_admin_id = $4
+           WHERE id = $5`,
+          [reviewer.username, nowIso, reviewNotes || null, newAdminId, id]
+        );
+
+        // Generate single-use 15-minute setup token (hashed in PostgreSQL) so approved user sets their own password
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        const tokenHash = hashToken(rawToken);
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        await dbRun(
+          `INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, requested_ip, created_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [tokenHash, newAdminId, expiresAt, ip, nowIso]
+        );
+
+        const setupUrl = `${getAppOrigin(req)}/admin/reset-password?token=${encodeURIComponent(rawToken)}`;
+        const inviteEmail = await sendPasswordResetEmail({
+          to: requestRow.email,
+          adminName: requestRow.full_name,
+          resetUrl: setupUrl,
+          expiresMinutes: 15,
+          ipAddress: ip,
+          isAccountSetup: true,
+        });
+
+        await sendAdminSecurityNotification({
+          eventTitle: 'Administrator Access Request Approved',
+          summary: `Super admin "${reviewer.username}" approved the access request for ${requestRow.full_name} (${requestRow.email}).`,
+          fields: [
+            { label: 'Approved By', value: `${reviewer.name} (${reviewer.username})` },
+            { label: 'New Username', value: username },
+            { label: 'Assigned Role', value: role },
+            { label: 'Applicant Email', value: requestRow.email },
+            { label: 'Setup Link Email', value: inviteEmail.sent ? 'Delivered via Resend (15-min expiry)' : `Not sent (${inviteEmail.error || 'unconfigured'})` },
+            { label: 'Notes', value: reviewNotes || 'None' },
+          ],
+        });
+
+        await logAudit({
+          adminUsername: reviewer.username,
+          adminName: reviewer.name,
+          action: 'access_request_approved',
+          contentType: 'auth',
+          recordId: id,
+          recordTitle: `${requestRow.full_name} (${username})`,
+          result: 'success',
+          details: `Approved access request as ${role} (${username}). Password setup link emailed: ${inviteEmail.sent ? 'yes' : 'no'}.`,
+          ipAddress: ip,
+        });
+
+        res.json({
+          ok: true,
+          emailSent: inviteEmail.sent,
+          emailError: inviteEmail.sent ? undefined : inviteEmail.error,
+        });
+      } catch (err: any) {
+        console.error('[Approve Access Request Error]', err);
+        res.status(500).json({ error: 'Unable to approve access request.' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/access-requests/:id/reject',
+    requireAuth,
+    requireRole('super_admin'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { id } = req.params;
+        const reviewer = req.adminUser!;
+        const ip = getClientIp(req);
+
+        const requestRow = await dbGet<any>('SELECT * FROM admin_access_requests WHERE id = $1', [id]);
+        if (!requestRow) {
+          res.status(404).json({ error: 'Access request not found.' });
+          return;
+        }
+        if (requestRow.status !== 'pending') {
+          res.status(400).json({ error: `This access request has already been ${requestRow.status}.` });
+          return;
+        }
+
+        const reviewNotes = sanitizeString(req.body?.reviewNotes || '', 500);
+        const nowIso = new Date().toISOString();
+
+        await dbRun(
+          `UPDATE admin_access_requests
+           SET status = 'rejected', reviewed_by = $1, reviewed_at = $2, review_notes = $3
+           WHERE id = $4`,
+          [reviewer.username, nowIso, reviewNotes || null, id]
+        );
+
+        await sendAdminSecurityNotification({
+          eventTitle: 'Administrator Access Request Rejected',
+          summary: `Super admin "${reviewer.username}" rejected the access request from ${requestRow.full_name} (${requestRow.email}).`,
+          fields: [
+            { label: 'Reviewed By', value: `${reviewer.name} (${reviewer.username})` },
+            { label: 'Applicant', value: `${requestRow.full_name} (${requestRow.email})` },
+            { label: 'Notes', value: reviewNotes || 'None' },
+            { label: 'Timestamp (UTC)', value: nowIso },
+          ],
+        });
+
+        await logAudit({
+          adminUsername: reviewer.username,
+          adminName: reviewer.name,
+          action: 'access_request_rejected',
+          contentType: 'auth',
+          recordId: id,
+          recordTitle: `${requestRow.full_name} <${requestRow.email}>`,
+          result: 'success',
+          details: `Rejected access request.${reviewNotes ? ` Notes: ${reviewNotes}` : ''}`,
+          ipAddress: ip,
+        });
+
+        res.json({ ok: true });
+      } catch (err: any) {
+        console.error('[Reject Access Request Error]', err);
+        res.status(500).json({ error: 'Unable to reject access request.' });
+      }
+    }
+  );
 
   // ============================================================
   // INTEGRATION STATUS & DASHBOARD OVERVIEW
@@ -604,10 +1198,12 @@ export function createApiApp(): express.Express {
       getSessionTtlHours(),
     ]);
     const ga4 = getGa4ConfigStatus();
+    const email = getEmailConfigStatus();
     res.json({
       sanity,
       ga4,
       database,
+      email,
       environment: {
         nodeEnv: process.env.NODE_ENV || 'development',
         siteUrl: process.env.SITE_URL || 'https://ryzite.com',

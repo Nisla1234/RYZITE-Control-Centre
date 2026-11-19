@@ -9,15 +9,38 @@ let pgPool: Pool | null = null;
 let sqliteDb: any = null;
 let initPromise: Promise<void> | null = null;
 
+export type CredentialSyncStatus =
+  | 'disabled'
+  | 'provisioned'
+  | 'synced'
+  | 'up_to_date'
+  | 'skipped_missing_env'
+  | 'skipped_short_password';
+
+let lastCredentialSyncStatus: CredentialSyncStatus = 'disabled';
+
+export function getCredentialSyncStatus(): CredentialSyncStatus {
+  return lastCredentialSyncStatus;
+}
+
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.NETLIFY === 'true');
 
+function cleanEnvValue(raw: string | undefined, trim = true): string {
+  let val = (raw || '').replace(/[\r\n]+/g, '');
+  if (trim) val = val.trim();
+  if (
+    val.length >= 2 &&
+    ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+  ) {
+    val = val.slice(1, -1);
+  }
+  return trim ? val.trim() : val;
+}
+
 function getPostgresUrl(): string | null {
-  const url = (
-    process.env.DATABASE_URL ||
-    process.env.NEON_DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    ''
-  ).trim();
+  const url = cleanEnvValue(
+    process.env.DATABASE_URL || process.env.NEON_DATABASE_URL || process.env.POSTGRES_URL
+  );
   return url.length > 0 ? url : null;
 }
 
@@ -46,9 +69,9 @@ function getPgPool(): Pool {
 
 async function getSqliteDb(): Promise<any> {
   if (!sqliteDb) {
-    if (IS_SERVERLESS) {
+    if (IS_SERVERLESS || process.env.NODE_ENV === 'production') {
       throw new Error(
-        'DATABASE_URL is required in serverless production (Vercel/Netlify). Configure your Neon PostgreSQL connection string in Environment Variables.'
+        'DATABASE_URL is required in production (Vercel/Netlify). SQLite fallback is disabled; configure your Neon PostgreSQL connection string in Environment Variables.'
       );
     }
     const modName = 'better-sqlite3';
@@ -143,13 +166,19 @@ export function hashPassword(password: string, existingSalt?: string): string {
 }
 
 export function verifyPassword(password: string, storedHash: string): boolean {
+  if (!password || !storedHash || typeof storedHash !== 'string') return false;
   const parts = storedHash.split(':');
   if (parts.length !== 2) return false;
   const [salt, key] = parts;
-  const derived = crypto.scryptSync(password, salt, 64);
-  const keyBuf = Buffer.from(key, 'hex');
-  if (derived.length !== keyBuf.length) return false;
-  return crypto.timingSafeEqual(derived, keyBuf);
+  if (!salt || !key) return false;
+  try {
+    const derived = crypto.scryptSync(password, salt, 64);
+    const keyBuf = Buffer.from(key, 'hex');
+    if (derived.length !== keyBuf.length) return false;
+    return crypto.timingSafeEqual(derived, keyBuf);
+  } catch {
+    return false;
+  }
 }
 
 export function ensureDatabaseReady(): Promise<void> {
@@ -239,6 +268,33 @@ export async function initDatabase(): Promise<void> {
         updated_at TEXT NOT NULL,
         updated_by TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        requested_ip TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+
+      CREATE TABLE IF NOT EXISTS admin_access_requests (
+        id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        review_notes TEXT,
+        created_admin_id TEXT,
+        requested_ip TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_access_requests_status ON admin_access_requests(status);
     `);
     await pool.query('ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS avatar_url TEXT');
   } else {
@@ -315,6 +371,34 @@ export async function initDatabase(): Promise<void> {
         updated_at TEXT NOT NULL,
         updated_by TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        requested_ip TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+
+      CREATE TABLE IF NOT EXISTS admin_access_requests (
+        id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        review_notes TEXT,
+        created_admin_id TEXT,
+        requested_ip TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_access_requests_status ON admin_access_requests(status);
     `);
 
     const adminCols = db.prepare('PRAGMA table_info(admin_users)').all() as { name: string }[];
@@ -323,23 +407,53 @@ export async function initDatabase(): Promise<void> {
     }
   }
 
-  // Provision initial administrator account from env vars ONLY if admin_users is empty
-  const existingAdmin = await dbGet('SELECT id FROM admin_users LIMIT 1');
-  if (!existingAdmin) {
-    const envUsername = (process.env.ADMIN_USERNAME || '').trim();
-    const envPassword = process.env.ADMIN_PASSWORD || '';
-    const isProduction = process.env.NODE_ENV === 'production' || IS_SERVERLESS;
+  // Provision or securely sync the administrator account from server-side env vars
+  const envUsername = cleanEnvValue(process.env.ADMIN_USERNAME, true);
+  const envPassword = cleanEnvValue(process.env.ADMIN_PASSWORD, false);
+  const syncFlag = cleanEnvValue(process.env.ADMIN_SYNC_CREDENTIALS, true).toLowerCase();
+  const syncCredentials = syncFlag === 'true' || syncFlag === '1' || syncFlag === 'yes';
+  const isProduction = process.env.NODE_ENV === 'production' || IS_SERVERLESS;
 
+  type AdminRow = {
+    id: string;
+    username: string;
+    name: string;
+    email: string;
+    role: string;
+    password_hash: string;
+  };
+
+  // Prefer matching existing username first (avoids UNIQUE collisions), then super_admin, then oldest admin
+  let existingAdmin: AdminRow | undefined;
+  if (envUsername) {
+    existingAdmin = await dbGet<AdminRow>(
+      'SELECT id, username, name, email, role, password_hash FROM admin_users WHERE lower(trim(username)) = lower($1) LIMIT 1',
+      [envUsername]
+    );
+  }
+  if (!existingAdmin) {
+    existingAdmin = await dbGet<AdminRow>(
+      "SELECT id, username, name, email, role, password_hash FROM admin_users WHERE role = 'super_admin' ORDER BY created_at ASC LIMIT 1"
+    );
+  }
+  if (!existingAdmin) {
+    existingAdmin = await dbGet<AdminRow>(
+      'SELECT id, username, name, email, role, password_hash FROM admin_users ORDER BY created_at ASC LIMIT 1'
+    );
+  }
+
+  if (!existingAdmin) {
     // In production/serverless, require explicit ADMIN_USERNAME & ADMIN_PASSWORD env vars
     if (isProduction && (!envUsername || !envPassword)) {
+      lastCredentialSyncStatus = 'skipped_missing_env';
       console.warn(
         '[RYZITE Auth] No admin account exists yet. Set ADMIN_USERNAME and ADMIN_PASSWORD environment variables (or run npm run admin:reset against DATABASE_URL) to provision the administrator.'
       );
     } else {
       const username = envUsername || 'admin';
       const password = envPassword || 'RyziteAdmin2026!';
-      const name = process.env.ADMIN_NAME || 'RYZITE Administrator';
-      const email = process.env.ADMIN_EMAIL || 'admin@ryzite.com';
+      const name = cleanEnvValue(process.env.ADMIN_NAME, true) || 'RYZITE Administrator';
+      const email = cleanEnvValue(process.env.ADMIN_EMAIL, true) || 'admin@ryzite.com';
       const now = new Date().toISOString();
 
       await dbRun(
@@ -347,7 +461,54 @@ export async function initDatabase(): Promise<void> {
          VALUES ($1, $2, $3, $4, $5, 'super_admin', $6)`,
         [crypto.randomUUID(), username, hashPassword(password), name, email, now]
       );
+      lastCredentialSyncStatus = 'provisioned';
     }
+  } else if (syncCredentials) {
+    if (!envUsername || !envPassword) {
+      lastCredentialSyncStatus = 'skipped_missing_env';
+      console.warn(
+        '[RYZITE Auth] ADMIN_SYNC_CREDENTIALS is enabled, but ADMIN_USERNAME or ADMIN_PASSWORD is missing.'
+      );
+    } else if (envPassword.length < 8) {
+      lastCredentialSyncStatus = 'skipped_short_password';
+      console.warn(
+        '[RYZITE Auth] ADMIN_SYNC_CREDENTIALS skipped because ADMIN_PASSWORD must be at least 8 characters.'
+      );
+    } else {
+      // Idempotent opt-in sync: updates ONLY the existing admin row if username, role, or password differs
+      const usernameChanged = existingAdmin.username.trim().toLowerCase() !== envUsername.toLowerCase();
+      const passwordChanged = !verifyPassword(envPassword, existingAdmin.password_hash);
+      const roleNeedsUpgrade = existingAdmin.role !== 'super_admin';
+
+      if (usernameChanged || passwordChanged || roleNeedsUpgrade) {
+        const targetName = cleanEnvValue(process.env.ADMIN_NAME, true) || existingAdmin.name;
+        const targetEmail = cleanEnvValue(process.env.ADMIN_EMAIL, true) || existingAdmin.email;
+        const nextHash = hashPassword(envPassword);
+
+        await dbRun(
+          "UPDATE admin_users SET username = $1, password_hash = $2, name = $3, email = $4, role = 'super_admin' WHERE id = $5",
+          [envUsername, nextHash, targetName, targetEmail, existingAdmin.id]
+        );
+        await dbRun('DELETE FROM admin_sessions');
+        await dbRun('DELETE FROM login_attempts');
+        await logAudit({
+          adminUsername: envUsername,
+          adminName: targetName,
+          action: 'sync_credentials',
+          contentType: 'auth',
+          recordId: existingAdmin.id,
+          recordTitle: envUsername,
+          result: 'success',
+          details: `Administrator credentials synced via server-side ADMIN_SYNC_CREDENTIALS (${engine}). Prior sessions revoked.`,
+          ipAddress: 'server-init',
+        });
+        lastCredentialSyncStatus = 'synced';
+      } else {
+        lastCredentialSyncStatus = 'up_to_date';
+      }
+    }
+  } else {
+    lastCredentialSyncStatus = 'disabled';
   }
 
   // Provision default site settings if empty

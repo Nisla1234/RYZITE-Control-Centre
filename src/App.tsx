@@ -3,6 +3,9 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AdminLayout } from './components/layout/AdminLayout';
 import { LoginPage } from './pages/LoginPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
+import { RequestAccessPage } from './pages/RequestAccessPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { PagesManagerPage } from './pages/PagesManagerPage';
 import { PortfolioPage } from './pages/PortfolioPage';
@@ -49,6 +52,12 @@ export default function App() {
           <Route path="/" element={<Navigate to="/admin/" replace />} />
           <Route path="/admin" element={<LoginPage />} />
           <Route path="/admin/" element={<LoginPage />} />
+          <Route path="/admin/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/admin/forgot-password/" element={<ForgotPasswordPage />} />
+          <Route path="/admin/reset-password" element={<ResetPasswordPage />} />
+          <Route path="/admin/reset-password/" element={<ResetPasswordPage />} />
+          <Route path="/admin/request-access" element={<RequestAccessPage />} />
+          <Route path="/admin/request-access/" element={<RequestAccessPage />} />
 
           <Route
             path="/admin/dashboard/*"

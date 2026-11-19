@@ -195,6 +195,20 @@ export interface ActivityLogEntry {
   createdAt: string;
 }
 
+export interface AdminAccessRequest {
+  id: string;
+  fullName: string;
+  email: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  reviewNotes: string | null;
+  createdAdminId: string | null;
+  requestedIp: string;
+  createdAt: string;
+}
+
 export interface IntegrationStatus {
   sanity: {
     projectId: string;
@@ -209,6 +223,20 @@ export interface IntegrationStatus {
   ga4: {
     configured: boolean;
     propertyId: string | null;
+    missingVars: string[];
+    message: string;
+  };
+  database?: {
+    engine: 'postgresql' | 'sqlite';
+    connected: boolean;
+    persistent: boolean;
+    message: string;
+  };
+  email?: {
+    configured: boolean;
+    provider: 'resend';
+    fromAddress: string | null;
+    notificationRecipients: string[];
     missingVars: string[];
     message: string;
   };

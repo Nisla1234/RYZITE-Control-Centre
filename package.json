@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
@@ -21,7 +24,6 @@
     "@types/multer": "^2.3.0",
     "@types/pg": "^8.23.1",
     "@vitejs/plugin-react": "^6.1.1",
-    "better-sqlite3": "^13.2.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -35,6 +37,9 @@
     "recharts": "^3.11.0",
     "serverless-http": "^4.0.0",
     "vite": "^8.3.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^13.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
