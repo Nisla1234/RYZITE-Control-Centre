@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Search, Edit3, Trash2, CheckCircle2, Clock } from 'lucide-react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { Plus, Search, Edit3, Trash2, CheckCircle2, Clock, Image as ImageIcon } from 'lucide-react';
 import { apiRequest, formatDateTime, slugify } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { StatusText } from '../components/ui/StatusText';
+import { SeoFieldsPanel } from '../components/ui/SeoFieldsPanel';
+import { MediaPickerModal } from '../components/media/MediaPickerModal';
 import type { ServiceOrSolution } from '../types/cms';
 
 interface Props {
@@ -36,8 +39,12 @@ function createEmpty(kind: 'service' | 'solution'): ServiceOrSolution {
 
 export function ServicesSolutionsPage({ kind }: Props) {
   const { notify } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const label = kind === 'service' ? 'Service' : 'Solution';
   const plural = kind === 'service' ? 'Services' : 'Solutions';
+  const basePath = kind === 'service' ? '/admin/services' : '/admin/solutions';
 
   const [items, setItems] = useState<ServiceOrSolution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,23 +54,46 @@ export function ServicesSolutionsPage({ kind }: Props) {
   const [benefitsText, setBenefitsText] = useState('');
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ServiceOrSolution | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [highlightField, setHighlightField] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await apiRequest<{ items: ServiceOrSolution[] }>(`/api/content/${kind}`);
-      setItems(data.items.sort((a, b) => (a.displayOrder || 99) - (b.displayOrder || 99)));
+      const sorted = data.items.sort((a, b) => (a.displayOrder || 99) - (b.displayOrder || 99));
+      setItems(sorted);
+      return sorted;
     } catch (err: any) {
       notify('error', err.message || `Failed to load ${plural.toLowerCase()}.`);
+      return [];
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    setEditing(null);
-    load();
-  }, [kind]);
+    load().then((loaded) => {
+      const targetId = location.pathname
+        .replace(new RegExp(`^${basePath}/?`), '')
+        .split('/')
+        .filter(Boolean)[0];
+      if (targetId && loaded.length > 0) {
+        const found = loaded.find((i) => i.id === targetId || i.slug === targetId);
+        if (found) {
+          setEditing(found);
+          setFeaturesText((found.features || []).join('\n'));
+          setBenefitsText((found.benefits || []).join('\n'));
+          setHighlightField(searchParams.get('field'));
+          return;
+        }
+      }
+      if (!targetId) {
+        setEditing(null);
+        setHighlightField(null);
+      }
+    });
+  }, [kind, location.pathname, searchParams]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return items;
@@ -302,53 +332,80 @@ export function ServicesSolutionsPage({ kind }: Props) {
             </div>
           </div>
 
-          <div className="lg:col-span-4 rounded-xl border border-[#DDE5F0] bg-white p-6 space-y-4 h-fit">
-            <h3 className="text-sm font-semibold text-[#0D1F4E]">{label} SEO & Media</h3>
-            <div>
-              <label className="block text-xs font-medium text-[#334155] mb-1">Image URL</label>
-              <input
-                type="text"
-                value={editing.imageUrl}
-                onChange={(e) => setEditing({ ...editing, imageUrl: e.target.value })}
-                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-[#334155] mb-1">Image Alt Text</label>
-              <input
-                type="text"
-                value={editing.imageAlt}
-                onChange={(e) => setEditing({ ...editing, imageAlt: e.target.value })}
-                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
-              />
-            </div>
-            <div className="pt-2 border-t border-[#E2E8F0]">
-              <label className="block text-xs font-medium text-[#334155] mb-1">Meta Title</label>
-              <input
-                type="text"
-                value={editing.seo?.metaTitle || ''}
-                onChange={(e) =>
-                  setEditing({ ...editing, seo: { ...editing.seo, metaTitle: e.target.value } })
+          <div className="lg:col-span-4 space-y-5 h-fit">
+            <div className="rounded-xl border border-[#DDE5F0] bg-white p-6 space-y-4">
+              <h3 className="text-sm font-semibold text-[#0D1F4E]">{label} Cover Image</h3>
+              <div>
+                <label className="block text-xs font-medium text-[#334155] mb-1">Image URL</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={editing.imageUrl}
+                    onChange={(e) => setEditing({ ...editing, imageUrl: e.target.value })}
+                    className="flex-1 rounded-lg border border-[#CBD5E1] px-3 py-2 text-xs focus:border-[#1438B8] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen(true)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#1438B8] text-[#1438B8] hover:bg-[#EEF3FC] px-2.5 py-2 text-xs font-semibold shrink-0"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5" /> Media
+                  </button>
+                </div>
+                {editing.imageUrl && (
+                  <img
+                    src={editing.imageUrl}
+                    alt={editing.imageAlt || editing.title}
+                    className="mt-2 h-28 w-full object-cover rounded-lg border border-[#DDE5F0]"
+                  />
+                )}
+              </div>
+              <div
+                className={
+                  highlightField === 'imageAlt'
+                    ? 'rounded-xl border-2 border-amber-400 bg-amber-50/50 p-2.5'
+                    : ''
                 }
-                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
-              />
+              >
+                <label className="block text-xs font-medium text-[#334155] mb-1">Image Alt Text</label>
+                <input
+                  type="text"
+                  value={editing.imageAlt}
+                  onChange={(e) => setEditing({ ...editing, imageAlt: e.target.value })}
+                  className="w-full rounded-lg border border-[#CBD5E1] bg-white px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-[#334155] mb-1">Meta Description</label>
-              <textarea
-                rows={3}
-                value={editing.seo?.metaDescription || ''}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    seo: { ...editing.seo, metaDescription: e.target.value },
-                  })
-                }
-                className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
+
+            <div className="rounded-xl border border-[#DDE5F0] bg-white p-6">
+              <h3 className="text-sm font-semibold text-[#0D1F4E] mb-4">{label} SEO Metadata</h3>
+              <SeoFieldsPanel
+                seo={editing.seo || { metaTitle: '', metaDescription: '' }}
+                slug={`/${kind}s/${editing.slug || slugify(editing.title || 'item')}`}
+                highlightField={highlightField}
+                onChange={(nextSeo) => setEditing({ ...editing, seo: nextSeo })}
               />
             </div>
           </div>
         </div>
+
+        <MediaPickerModal
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          title={`Select ${label} Cover Image`}
+          onSelect={(sel) =>
+            setEditing((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    imageUrl: sel.url,
+                    imageMediaId: sel.mediaId,
+                    imageAlt: prev.imageAlt || sel.altText,
+                  }
+                : prev
+            )
+          }
+        />
       </div>
     );
   }

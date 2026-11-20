@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import {
   Plus,
   Search,
@@ -12,11 +13,14 @@ import {
   Italic,
   Heading2,
   List,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { apiRequest, formatDateTime, slugify } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { StatusText } from '../components/ui/StatusText';
+import { SeoFieldsPanel } from '../components/ui/SeoFieldsPanel';
+import { MediaPickerModal } from '../components/media/MediaPickerModal';
 import type { ArticleItem } from '../types/cms';
 
 function emptyArticle(): ArticleItem {
@@ -41,6 +45,8 @@ function emptyArticle(): ArticleItem {
 
 export function ArticlesPage() {
   const { notify } = useAuth();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const [items, setItems] = useState<ArticleItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -50,22 +56,40 @@ export function ArticlesPage() {
   const [previewing, setPreviewing] = useState<ArticleItem | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ArticleItem | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [highlightField, setHighlightField] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await apiRequest<{ items: ArticleItem[] }>('/api/content/article');
       setItems(data.items);
+      return data.items;
     } catch (err: any) {
       notify('error', err.message || 'Failed to load articles.');
+      return [];
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    load().then((loaded) => {
+      const targetId = location.pathname
+        .replace(/^\/admin\/articles\/?/, '')
+        .split('/')
+        .filter(Boolean)[0];
+      if (targetId && loaded.length > 0) {
+        const found = loaded.find((a) => a.id === targetId || a.slug === targetId);
+        if (found) {
+          setEditing(found);
+          setCategoriesText((found.categories || []).join(', '));
+          setTagsText((found.tags || []).join(', '));
+          setHighlightField(searchParams.get('field'));
+        }
+      }
+    });
+  }, [location.pathname, searchParams]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return items;
@@ -307,46 +331,76 @@ export function ArticlesPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-[#334155] mb-1">Featured Image URL</label>
+                <label className="block text-xs font-medium text-[#334155] mb-1">Featured Image</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={editing.featuredImageUrl}
+                    onChange={(e) => setEditing({ ...editing, featuredImageUrl: e.target.value })}
+                    className="flex-1 rounded-lg border border-[#CBD5E1] px-3 py-2 text-xs focus:border-[#1438B8] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen(true)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#1438B8] text-[#1438B8] hover:bg-[#EEF3FC] px-2.5 py-2 text-xs font-semibold shrink-0"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5" /> Media
+                  </button>
+                </div>
+                {editing.featuredImageUrl && (
+                  <img
+                    src={editing.featuredImageUrl}
+                    alt={editing.featuredImageAlt || editing.title}
+                    className="mt-2 h-28 w-full object-cover rounded-lg border border-[#DDE5F0]"
+                  />
+                )}
+              </div>
+              <div
+                className={
+                  highlightField === 'imageAlt'
+                    ? 'rounded-xl border-2 border-amber-400 bg-amber-50/50 p-2.5'
+                    : ''
+                }
+              >
+                <label className="block text-xs font-medium text-[#334155] mb-1">Featured Image Alt Text</label>
                 <input
                   type="text"
-                  value={editing.featuredImageUrl}
-                  onChange={(e) => setEditing({ ...editing, featuredImageUrl: e.target.value })}
-                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
+                  value={editing.featuredImageAlt || ''}
+                  onChange={(e) => setEditing({ ...editing, featuredImageAlt: e.target.value })}
+                  className="w-full rounded-lg border border-[#CBD5E1] bg-white px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
                 />
               </div>
             </div>
 
-            <div className="rounded-xl border border-[#DDE5F0] bg-white p-6 space-y-3.5">
-              <h3 className="text-sm font-semibold text-[#0D1F4E]">SEO & Social Metadata</h3>
-              <div>
-                <label className="block text-xs font-medium text-[#334155] mb-1">SEO Title</label>
-                <input
-                  type="text"
-                  value={editing.seo?.metaTitle || ''}
-                  onChange={(e) =>
-                    setEditing({ ...editing, seo: { ...editing.seo, metaTitle: e.target.value } })
-                  }
-                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[#334155] mb-1">SEO Description</label>
-                <textarea
-                  rows={3}
-                  value={editing.seo?.metaDescription || ''}
-                  onChange={(e) =>
-                    setEditing({
-                      ...editing,
-                      seo: { ...editing.seo, metaDescription: e.target.value },
-                    })
-                  }
-                  className="w-full rounded-lg border border-[#CBD5E1] px-3 py-2 text-sm focus:border-[#1438B8] focus:outline-none"
-                />
-              </div>
+            <div className="rounded-xl border border-[#DDE5F0] bg-white p-6">
+              <h3 className="text-sm font-semibold text-[#0D1F4E] mb-4">SEO & Social Metadata</h3>
+              <SeoFieldsPanel
+                seo={editing.seo || { metaTitle: '', metaDescription: '' }}
+                slug={`/articles/${editing.slug || slugify(editing.title || 'article')}`}
+                highlightField={highlightField}
+                onChange={(nextSeo) => setEditing({ ...editing, seo: nextSeo })}
+              />
             </div>
           </div>
         </div>
+
+        <MediaPickerModal
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          title="Select Article Featured Image"
+          onSelect={(sel) =>
+            setEditing((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    featuredImageUrl: sel.url,
+                    featuredImageMediaId: sel.mediaId,
+                    featuredImageAlt: prev.featuredImageAlt || sel.altText,
+                  }
+                : prev
+            )
+          }
+        />
 
         {previewing && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0D1F4E]/60 p-4">

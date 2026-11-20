@@ -29,13 +29,38 @@ import type { ActivityLogEntry, AnalyticsDateRange, AnalyticsReport, Integration
 interface DashboardOverview {
   counts: Record<string, { total: number; published: number; draft: number }>;
   mediaCount: number;
+  mediaStorageBytes?: number;
+  missingAltCount?: number;
+  seoSummary?: {
+    errorCount: number;
+    warningCount: number;
+    moduleCounts: Record<string, number>;
+  };
   recentUpdates: {
     id: string;
     docType: string;
     title: string;
+    slug?: string;
     status: 'draft' | 'published';
     updatedAt: string;
     updatedBy: string;
+  }[];
+  recentPages?: {
+    id: string;
+    title: string;
+    slug: string;
+    status: 'draft' | 'published';
+    updatedAt: string;
+    updatedBy: string;
+  }[];
+  recentMedia?: {
+    id: string;
+    title?: string;
+    originalName: string;
+    url: string;
+    mimeType: string;
+    sizeBytes: number;
+    uploadedAt: string;
   }[];
   recentActivity: ActivityLogEntry[];
   sanity: IntegrationStatus['sanity'];
@@ -75,8 +100,6 @@ export function DashboardPage() {
   const [customEnd, setCustomEnd] = useState('');
   const [loading, setLoading] = useState(true);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
-  const [importingMainSite, setImportingMainSite] = useState(false);
-  const [mainSiteImportMessage, setMainSiteImportMessage] = useState('');
 
   const loadOverview = async () => {
     setLoading(true);
@@ -115,36 +138,6 @@ export function DashboardPage() {
     loadOverview();
     loadAnalytics('30d');
   }, []);
-
-  const importMainSiteContent = async () => {
-    if (importingMainSite) return;
-    setImportingMainSite(true);
-    setMainSiteImportMessage('');
-    try {
-      const result = await apiRequest<{
-        imported: Record<string, number>;
-        skipped: Record<string, number>;
-      }>('/api/content/import-main-site', { method: 'POST', body: JSON.stringify({}) });
-      const labels: Record<string, string> = {
-        page: 'Pages',
-        service: 'Services',
-        solution: 'Solutions',
-        article: 'Article drafts',
-        media: 'Media assets',
-      };
-      const breakdown = Object.entries(result.imported)
-        .map(([key, count]) => `${labels[key] || key}: ${count}`)
-        .join(' · ');
-      const added = Object.values(result.imported).reduce((sum, count) => sum + count, 0);
-      const preserved = Object.values(result.skipped).reduce((sum, count) => sum + count, 0);
-      setMainSiteImportMessage(`Imported ${added} records (${breakdown}). Preserved ${preserved} existing records. Portfolio, Team and Testimonials have no approved source entries to import.`);
-      await loadOverview();
-    } catch (err: any) {
-      setMainSiteImportMessage(err.message || 'Main-site import failed.');
-    } finally {
-      setImportingMainSite(false);
-    }
-  };
 
   const handlePresetClick = (p: AnalyticsDateRange['preset']) => {
     setPreset(p);
@@ -225,23 +218,88 @@ export function DashboardPage() {
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </button>
-          <button
-            type="button"
-            onClick={importMainSiteContent}
-            disabled={importingMainSite}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#102D96] disabled:opacity-60"
-          >
-            <Database className="h-3.5 w-3.5" />
-            {importingMainSite ? 'Importing...' : 'Import Main Site'}
-          </button>
         </div>
       </div>
 
-      {mainSiteImportMessage && (
-        <p role="status" className="rounded-lg border border-[#DDE5F0] bg-white px-4 py-2 text-xs text-[#334155]">
-          {mainSiteImportMessage}
-        </p>
-      )}
+      {/* CMS & SEO Health Strip (Real Database Metrics) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Link
+          to="/admin/pages/"
+          className="rounded-xl border border-[#DDE5F0] bg-white p-4 hover:border-[#1438B8] transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-[#64748B]">Website Pages</p>
+            <p className="text-2xl font-bold text-[#0F172A] mt-0.5 font-mono tabular-nums">
+              {overview?.counts.page?.published ?? 0}
+              <span className="text-xs font-normal text-[#64748B] ml-1.5">
+                live / {overview?.counts.page?.draft ?? 0} draft
+              </span>
+            </p>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-[#EEF3FC] text-[#1438B8] flex items-center justify-center shrink-0">
+            <FileText className="w-5 h-5" />
+          </div>
+        </Link>
+
+        <Link
+          to="/admin/seo/"
+          className="rounded-xl border border-[#DDE5F0] bg-white p-4 hover:border-[#1438B8] transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-[#64748B]">SEO Health Issues</p>
+            <p className="text-2xl font-bold text-[#0F172A] mt-0.5 font-mono tabular-nums">
+              {overview?.seoSummary?.errorCount ?? 0}
+              <span className="text-xs font-normal text-red-600 ml-1">err</span>
+              <span className="text-xs font-normal text-[#64748B] mx-1">·</span>
+              <span className="text-lg font-bold text-amber-600">
+                {overview?.seoSummary?.warningCount ?? 0}
+              </span>
+              <span className="text-xs font-normal text-amber-700 ml-1">warn</span>
+            </p>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+            <ShieldAlert className="w-5 h-5" />
+          </div>
+        </Link>
+
+        <Link
+          to="/admin/media/"
+          className="rounded-xl border border-[#DDE5F0] bg-white p-4 hover:border-[#1438B8] transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-[#64748B]">Media Storage</p>
+            <p className="text-2xl font-bold text-[#0F172A] mt-0.5 font-mono tabular-nums">
+              {((overview?.mediaStorageBytes ?? 0) / (1024 * 1024)).toFixed(2)}
+              <span className="text-xs font-normal text-[#64748B] ml-1">MB</span>
+            </p>
+            <p className="text-[11px] text-[#64748B]">
+              {overview?.mediaCount ?? 0} total asset(s)
+            </p>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-[#EEF3FC] text-[#1438B8] flex items-center justify-center shrink-0">
+            <ImageIcon className="w-5 h-5" />
+          </div>
+        </Link>
+
+        <Link
+          to="/admin/media/"
+          className="rounded-xl border border-[#DDE5F0] bg-white p-4 hover:border-[#1438B8] transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-[#64748B]">Missing Alt Text</p>
+            <p className="text-2xl font-bold text-[#0F172A] mt-0.5 font-mono tabular-nums">
+              {overview?.missingAltCount ?? 0}
+              <span className="text-xs font-normal text-[#64748B] ml-1.5">images</span>
+            </p>
+            <p className="text-[11px] text-[#64748B]">
+              {(overview?.missingAltCount ?? 0) === 0 ? 'All media accessible' : 'Click to fix in Media'}
+            </p>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+            <Database className="w-5 h-5" />
+          </div>
+        </Link>
+      </div>
 
       {/* Top Hero Split — Inspired by Reference Image 2 (Deep RYZITE Navy Summary + Chart / Status Area) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">

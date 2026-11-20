@@ -18,6 +18,7 @@ import { SeoCenterPage } from './pages/SeoCenterPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { ActivityLogsPage } from './pages/ActivityLogsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { PublicWebsitePage } from './pages/PublicWebsitePage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -49,7 +50,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Navigate to="/admin/" replace />} />
+          <Route path="/" element={<PublicWebsitePage />} />
           <Route path="/admin" element={<LoginPage />} />
           <Route path="/admin/" element={<LoginPage />} />
           <Route path="/admin/forgot-password" element={<ForgotPasswordPage />} />
@@ -164,7 +165,7 @@ export default function App() {
             }
           />
 
-          <Route path="*" element={<Navigate to="/admin/" replace />} />
+          <Route path="/*" element={<PublicWebsitePage />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

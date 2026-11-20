@@ -23,21 +23,45 @@ export interface SeoFields {
   noIndex?: boolean;
 }
 
-export type PageBlockType = 'heading' | 'paragraph' | 'image' | 'cta' | 'list';
+export type PageBlockType =
+  | 'hero'
+  | 'heading'
+  | 'paragraph'
+  | 'image'
+  | 'cta'
+  | 'list'
+  | 'cards'
+  | 'stats'
+  | 'faq'
+  | 'contact';
 
 export interface PageBlock {
   id: string;
   type: PageBlockType;
+  visible?: boolean;
   level?: 1 | 2 | 3; // for heading
   text?: string; // for heading, paragraph (supports **bold**, *italic*, [label](url))
+  eyebrow?: string; // for hero
+  subtitle?: string; // for hero / section intro
+  primaryButtonText?: string; // for hero
+  primaryButtonUrl?: string; // for hero
+  secondaryButtonText?: string; // for hero
+  secondaryButtonUrl?: string; // for hero
   items?: string[]; // for list
-  imageUrl?: string; // for image
-  imageAlt?: string; // for image
+  mediaId?: string; // linked Media Library asset ID
+  imageUrl?: string; // for image / hero
+  imageAlt?: string; // for image / hero
   caption?: string; // for image
   ctaHeading?: string; // for cta
   ctaBody?: string; // for cta
   ctaButtonText?: string; // for cta
   ctaButtonUrl?: string; // for cta
+  cards?: { title: string; description: string; linkText?: string; linkUrl?: string; imageUrl?: string; mediaId?: string }[];
+  stats?: { value: string; label: string; note?: string }[];
+  faqs?: { question: string; answer: string }[];
+  contactEmail?: string;
+  contactPhone?: string;
+  contactAddress?: string;
 }
 
 export interface WebsitePage {
@@ -50,6 +74,20 @@ export interface WebsitePage {
   updatedAt: string;
   updatedBy: string;
   publishedAt?: string | null;
+  publishedBy?: string | null;
+  hasUnpublishedChanges?: boolean;
+}
+
+export interface ContentRevision {
+  id: string;
+  docType: string;
+  docId: string;
+  action: string;
+  status: ContentStatus;
+  data: any;
+  summary: string;
+  createdAt: string;
+  createdBy: string;
 }
 
 export interface PortfolioProject {
@@ -62,7 +100,8 @@ export interface PortfolioProject {
   projectUrl: string;
   thumbnailUrl: string;
   thumbnailAlt: string;
-  gallery: { url: string; alt: string }[];
+  thumbnailMediaId?: string;
+  gallery: { url: string; alt: string; mediaId?: string }[];
   featured: boolean;
   displayOrder: number;
   status: ContentStatus;
@@ -82,6 +121,7 @@ export interface ServiceOrSolution {
   iconName: string;
   imageUrl: string;
   imageAlt: string;
+  imageMediaId?: string;
   features: string[];
   benefits: string[];
   ctaText: string;
@@ -101,6 +141,7 @@ export interface TeamMember {
   bio: string;
   avatarUrl: string;
   avatarAlt: string;
+  avatarMediaId?: string;
   socialLinks: {
     linkedin?: string;
     github?: string;
@@ -121,6 +162,7 @@ export interface ArticleItem {
   body: string;
   featuredImageUrl: string;
   featuredImageAlt: string;
+  featuredImageMediaId?: string;
   author: string;
   categories: string[];
   tags: string[];
@@ -139,11 +181,20 @@ export interface TestimonialItem {
   company: string;
   avatarUrl: string;
   avatarAlt: string;
+  avatarMediaId?: string;
   rating: number;
   displayOrder: number;
   status: ContentStatus;
   updatedAt: string;
   updatedBy: string;
+}
+
+export interface MediaUsageRef {
+  entityType: string;
+  entityId: string;
+  entityTitle: string;
+  field: string;
+  deepLink: string;
 }
 
 export interface MediaAsset {
@@ -154,9 +205,23 @@ export interface MediaAsset {
   sizeBytes: number;
   url: string;
   altText: string;
-  source: 'sanity' | 'local' | 'main-site';
+  title?: string;
+  caption?: string;
+  description?: string;
+  category?: string;
+  focalPoint?: { x: number; y: number };
+  width?: number | null;
+  height?: number | null;
+  sha256?: string | null;
+  version?: number;
+  source: 'sanity' | 'local' | 'database';
   uploadedBy: string;
   uploadedAt: string;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+  usageCount?: number;
+  usedIn?: MediaUsageRef[];
+  duplicateOf?: string | null;
 }
 
 export interface GlobalSeoSettings {
@@ -164,6 +229,7 @@ export interface GlobalSeoSettings {
   siteDescription: string;
   siteUrl: string;
   defaultOgImage: string;
+  defaultOgMediaId?: string;
   robotsDirectives: string;
   sitemapEnabled: boolean;
   sessionTimeoutHours: number;
@@ -173,12 +239,35 @@ export interface GlobalSeoSettings {
 
 export interface SeoIssue {
   id: string;
-  severity: 'error' | 'warning';
+  severity: 'error' | 'warning' | 'info';
   entityType: string;
   entityId: string;
   entityTitle: string;
+  slug?: string;
   field: string;
+  currentValue?: string;
+  recommended?: string;
   message: string;
+  deepLink: string;
+  module: 'page' | 'service' | 'solution' | 'article' | 'portfolio' | 'media' | 'global';
+}
+
+export interface SeoAuditResult {
+  issues: SeoIssue[];
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+  moduleCounts: {
+    page: number;
+    service: number;
+    solution: number;
+    article: number;
+    portfolio: number;
+    media: number;
+    global: number;
+    total: number;
+  };
+  checkedAt: string;
 }
 
 export interface ActivityLogEntry {

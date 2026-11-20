@@ -35,12 +35,24 @@ import {
 import {
   deleteDocument,
   getDocument,
+  getRevisionById,
   getSanityClient,
   hasSanityWriteToken,
   inspectSanityProject,
   listDocuments,
+  listPublishedDocuments,
+  listRevisions,
   saveDocument,
 } from './sanity.ts';
+import {
+  computeMediaUsageMap,
+  computeSha256,
+  extractImageDimensions,
+  mapMediaRow,
+  propagateMediaUrlChange,
+  runSeoAudit,
+  validateUploadSafety,
+} from './cmsHelpers.ts';
 import { fetchGa4Analytics, getGa4ConfigStatus } from './ga4.ts';
 import { mainSiteSeed } from './main-site-seed.ts';
 import {
@@ -1237,12 +1249,25 @@ export function createApiApp(): express.Express {
       else counts[r.doc_type].draft += c;
     }
 
-    const mediaRow = await dbGet<{ count: string | number }>('SELECT COUNT(*) as count FROM media_assets');
-    const mediaCount = Number(mediaRow?.count || 0);
+    const mediaStats = await dbGet<{ count: string | number; total_bytes: string | number }>(
+      'SELECT COUNT(*) as count, COALESCE(SUM(size_bytes), 0) as total_bytes FROM media_assets'
+    );
+    const mediaCount = Number(mediaStats?.count || 0);
+    const mediaStorageBytes = Number(mediaStats?.total_bytes || 0);
+
+    const missingAltRow = await dbGet<{ count: string | number }>(
+      "SELECT COUNT(*) as count FROM media_assets WHERE mime_type LIKE 'image/%' AND trim(COALESCE(alt_text, '')) = ''"
+    );
+    const missingAltCount = Number(missingAltRow?.count || 0);
+
+    const recentMediaRows = await dbAll<any>(
+      'SELECT * FROM media_assets ORDER BY uploaded_at DESC LIMIT 6'
+    );
+    const recentMedia = recentMediaRows.map((r) => mapMediaRow(r));
 
     const recentDocs = (
       await dbAll<any>(
-        'SELECT id, doc_type, status, data_json, updated_at, updated_by FROM cms_documents ORDER BY updated_at DESC LIMIT 8'
+        'SELECT id, doc_type, status, data_json, updated_at, updated_by, published_at FROM cms_documents ORDER BY updated_at DESC LIMIT 8'
       )
     ).map((r) => {
       const parsed = JSON.parse(r.data_json);
@@ -1250,14 +1275,33 @@ export function createApiApp(): express.Express {
         id: r.id,
         docType: r.doc_type,
         title: getRecordTitle(parsed),
+        slug: parsed.slug || '',
         status: r.status,
         updatedAt: r.updated_at,
         updatedBy: r.updated_by,
+        publishedAt: r.published_at || parsed.publishedAt || null,
+      };
+    });
+
+    const recentPages = (
+      await dbAll<any>(
+        "SELECT id, status, data_json, updated_at, updated_by, published_at FROM cms_documents WHERE doc_type = 'page' ORDER BY updated_at DESC LIMIT 6"
+      )
+    ).map((r) => {
+      const parsed = JSON.parse(r.data_json);
+      return {
+        id: r.id,
+        title: parsed.title || r.id,
+        slug: parsed.slug || '/',
+        status: r.status,
+        updatedAt: r.updated_at,
+        updatedBy: r.updated_by,
+        publishedAt: r.published_at || parsed.publishedAt || null,
       };
     });
 
     const recentActivity = (
-      await dbAll<any>('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 8')
+      await dbAll<any>('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 10')
     ).map((r) => ({
       id: r.id,
       adminUsername: r.admin_username,
@@ -1274,15 +1318,102 @@ export function createApiApp(): express.Express {
 
     const sanity = await inspectSanityProject();
     const ga4 = getGa4ConfigStatus();
+    const seoAudit = await runSeoAudit();
 
     res.json({
       counts,
       mediaCount,
+      mediaStorageBytes,
+      missingAltCount,
+      seoSummary: {
+        errorCount: seoAudit.errorCount,
+        warningCount: seoAudit.warningCount,
+        moduleCounts: seoAudit.moduleCounts,
+      },
       recentUpdates: recentDocs,
+      recentPages,
+      recentMedia,
       recentActivity,
       sanity,
       ga4,
     });
+  });
+
+  // ============================================================
+  // PUBLIC READ-ONLY WEBSITE ENDPOINTS (PUBLISHED CONTENT ONLY)
+  // ============================================================
+
+  app.get('/api/public/site', async (_req, res) => {
+    const settingsRow = await dbGet<{ value_json: string }>(
+      'SELECT value_json FROM site_settings WHERE key = $1',
+      ['global_seo']
+    );
+    const globalSeo: GlobalSeoSettings | null = settingsRow
+      ? JSON.parse(settingsRow.value_json)
+      : null;
+
+    const [pages, services, solutions, portfolio, team, testimonials, articles] =
+      await Promise.all([
+        listPublishedDocuments<WebsitePage>('page'),
+        listPublishedDocuments<any>('service'),
+        listPublishedDocuments<any>('solution'),
+        listPublishedDocuments<any>('project'),
+        listPublishedDocuments<any>('team'),
+        listPublishedDocuments<any>('testimonial'),
+        listPublishedDocuments<any>('article'),
+      ]);
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      globalSeo,
+      pages,
+      services: services.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
+      solutions: solutions.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
+      portfolio: portfolio.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
+      team: team.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
+      testimonials: testimonials.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
+      articles,
+    });
+  });
+
+  app.get('/api/public/page', async (req, res) => {
+    const rawSlug = sanitizeString(req.query.slug, 200) || '/';
+    const normalizedSlug = rawSlug.startsWith('/') ? rawSlug : `/${rawSlug}`;
+
+    const pages = await listPublishedDocuments<WebsitePage>('page');
+    const page = pages.find((p) => {
+      const pSlug = (p.slug || '/').startsWith('/') ? p.slug : `/${p.slug}`;
+      return pSlug.toLowerCase() === normalizedSlug.toLowerCase();
+    });
+
+    if (!page) {
+      res.status(404).json({ error: 'Published page not found.' });
+      return;
+    }
+
+    const settingsRow = await dbGet<{ value_json: string }>(
+      'SELECT value_json FROM site_settings WHERE key = $1',
+      ['global_seo']
+    );
+    const globalSeo: GlobalSeoSettings | null = settingsRow
+      ? JSON.parse(settingsRow.value_json)
+      : null;
+
+    const resolvedSeo = {
+      title: page.seo?.metaTitle || globalSeo?.siteTitle || page.title,
+      description: page.seo?.metaDescription || globalSeo?.siteDescription || '',
+      canonicalUrl:
+        page.seo?.canonicalUrl ||
+        `${(globalSeo?.siteUrl || 'https://ryzite.lk').replace(/\/$/, '')}${normalizedSlug === '/' ? '/' : normalizedSlug}`,
+      ogTitle: page.seo?.ogTitle || page.seo?.metaTitle || globalSeo?.siteTitle || page.title,
+      ogDescription:
+        page.seo?.ogDescription || page.seo?.metaDescription || globalSeo?.siteDescription || '',
+      ogImage: page.seo?.ogImage || globalSeo?.defaultOgImage || '/assets/branding/ryzite-logo.png',
+      noIndex: Boolean(page.seo?.noIndex),
+    };
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ page, seo: resolvedSeo, globalSeo });
   });
 
   // ============================================================
@@ -1571,14 +1702,23 @@ export function createApiApp(): express.Express {
     }
 
     const nextStatus = req.body?.status === 'published' ? 'published' : 'draft';
+    const unpublish = nextStatus === 'draft' && req.body?.unpublish !== false;
     const saved = await saveDocument(
       docType,
       {
         ...existing,
         status: nextStatus,
-        publishedAt: nextStatus === 'published' ? new Date().toISOString() : existing.publishedAt,
+        publishedAt: nextStatus === 'published' ? new Date().toISOString() : unpublish ? null : existing.publishedAt,
       },
-      req.adminUser!.username
+      req.adminUser!.username,
+      {
+        unpublish,
+        revisionAction: nextStatus === 'published' ? 'publish' : 'unpublish',
+        revisionSummary:
+          nextStatus === 'published'
+            ? `Published ${getRecordTitle(existing)}`
+            : `Unpublished ${getRecordTitle(existing)}`,
+      }
     );
 
     await logAudit({
@@ -1589,11 +1729,63 @@ export function createApiApp(): express.Express {
       recordId: id,
       recordTitle: getRecordTitle(saved),
       result: 'success',
-      details: `${nextStatus === 'published' ? 'Published' : 'Moved to draft'}: ${getRecordTitle(saved)}.`,
+      details: `${nextStatus === 'published' ? 'Published' : 'Unpublished (moved to draft)'}: ${getRecordTitle(saved)}.`,
       ipAddress: getClientIp(req),
     });
 
     res.json({ item: saved });
+  });
+
+  app.get('/api/content/:type/:id/revisions', requireAuth, async (req, res) => {
+    const { type: docType, id } = req.params;
+    if (!ALLOWED_CONTENT_TYPES.has(docType)) {
+      res.status(400).json({ error: 'Invalid content type.' });
+      return;
+    }
+    const items = await listRevisions(docType, id, 25);
+    res.json({ items });
+  });
+
+  app.post('/api/content/:type/:id/revisions/:revId/restore', requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { type: docType, id, revId } = req.params;
+    if (!ALLOWED_CONTENT_TYPES.has(docType)) {
+      res.status(400).json({ error: 'Invalid content type.' });
+      return;
+    }
+    const rev = await getRevisionById(revId);
+    if (!rev || rev.docType !== docType || rev.docId !== id) {
+      res.status(404).json({ error: 'Revision not found.' });
+      return;
+    }
+
+    const publishImmediately = Boolean(req.body?.publish);
+    const restored = await saveDocument(
+      docType,
+      {
+        ...rev.data,
+        id,
+        status: publishImmediately ? 'published' : 'draft',
+      },
+      req.adminUser!.username,
+      {
+        revisionAction: 'restore',
+        revisionSummary: `Restored revision from ${new Date(rev.createdAt).toLocaleString()} (${publishImmediately ? 'published' : 'draft'})`,
+      }
+    );
+
+    await logAudit({
+      adminUsername: req.adminUser!.username,
+      adminName: req.adminUser!.name,
+      action: 'restore_revision',
+      contentType: docType,
+      recordId: id,
+      recordTitle: getRecordTitle(restored),
+      result: 'success',
+      details: `Restored revision ${revId.slice(0, 8)} as ${publishImmediately ? 'published' : 'draft'}.`,
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({ item: restored });
   });
 
   app.delete('/api/content/:type/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -1630,21 +1822,69 @@ export function createApiApp(): express.Express {
   // MEDIA LIBRARY ENDPOINTS
   // ============================================================
 
+  // Public file delivery endpoint for DB-backed or local media assets
+  app.get('/api/media/:id/file', async (req, res) => {
+    const { id } = req.params;
+    const row = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
+    if (!row) {
+      res.status(404).json({ error: 'Media file not found.' });
+      return;
+    }
+
+    if (row.source === 'sanity' && row.url && row.url.startsWith('http')) {
+      res.redirect(302, row.url);
+      return;
+    }
+
+    if (row.content_data_url && typeof row.content_data_url === 'string') {
+      const match = row.content_data_url.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const mime = match[1] || row.mime_type || 'application/octet-stream';
+        const buf = Buffer.from(match[2], 'base64');
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Content-Length', buf.length);
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        if (mime === 'image/svg+xml') {
+          res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+        }
+        res.send(buf);
+        return;
+      }
+    }
+
+    if (!IS_SERVERLESS && row.file_name) {
+      const filePath = path.join(UPLOADS_DIR, row.file_name);
+      if (fs.existsSync(filePath)) {
+        res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        if (row.mime_type === 'image/svg+xml') {
+          res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+        }
+        res.sendFile(filePath);
+        return;
+      }
+    }
+
+    res.status(404).json({ error: 'Media binary is unavailable.' });
+  });
+
   app.get('/api/media', requireAuth, async (_req, res) => {
     const rows = await dbAll<any>('SELECT * FROM media_assets ORDER BY uploaded_at DESC');
-    const items: MediaAsset[] = rows.map((r) => ({
-      id: r.id,
-      fileName: r.file_name,
-      originalName: r.original_name,
-      mimeType: r.mime_type,
-      sizeBytes: Number(r.size_bytes),
-      url: r.url,
-      altText: r.alt_text,
-      source: r.source,
-      uploadedBy: r.uploaded_by,
-      uploadedAt: r.uploaded_at,
-    }));
+    const usageMap = await computeMediaUsageMap(rows);
+    const items: MediaAsset[] = rows.map((r) => mapMediaRow(r, usageMap));
     res.json({ items });
+  });
+
+  app.get('/api/media/:id/usage', requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const row = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
+    if (!row) {
+      res.status(404).json({ error: 'Media asset not found.' });
+      return;
+    }
+    const usageMap = await computeMediaUsageMap([row]);
+    const usedIn = usageMap.get(id) || [];
+    res.json({ id, usageCount: usedIn.length, usedIn });
   });
 
   app.post('/api/media/upload', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -1658,11 +1898,32 @@ export function createApiApp(): express.Express {
         return;
       }
 
+      const safetyErr = validateUploadSafety(req.file.buffer, req.file.mimetype);
+      if (safetyErr) {
+        res.status(400).json({ error: safetyErr });
+        return;
+      }
+
       const id = `media-${crypto.randomUUID().slice(0, 8)}`;
       const altText = sanitizeString(req.body?.altText, 300);
+      const title =
+        sanitizeString(req.body?.title, 180) ||
+        req.file.originalname.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ');
+      const caption = sanitizeString(req.body?.caption, 400);
+      const description = sanitizeString(req.body?.description, 1000);
+      const category = sanitizeString(req.body?.category, 60) || 'general';
       const generatedName = safeFileName(req.file.originalname, req.file.mimetype);
+      const sha256 = computeSha256(req.file.buffer);
+      const dims = extractImageDimensions(req.file.buffer, req.file.mimetype);
+
+      const duplicateRow = await dbGet<{ id: string; original_name: string }>(
+        'SELECT id, original_name FROM media_assets WHERE sha256 = $1 LIMIT 1',
+        [sha256]
+      );
+
       let url = '';
-      let source: 'sanity' | 'local' = 'local';
+      let source: 'sanity' | 'local' | 'database' = 'local';
+      let contentDataUrl: string | null = null;
 
       if (hasSanityWriteToken()) {
         try {
@@ -1682,13 +1943,21 @@ export function createApiApp(): express.Express {
       }
 
       if (!url) {
+        // Store base64 data URI in DB for files <= 4MB so serverless/Vercel & local never break
+        if (req.file.size <= 4 * 1024 * 1024) {
+          contentDataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+        }
         if (!IS_SERVERLESS) {
           fs.writeFileSync(path.join(UPLOADS_DIR, generatedName), req.file.buffer);
-          url = `/uploads/${generatedName}`;
+          url = `/api/media/${id}/file?v=1`;
+          source = 'local';
+        } else if (contentDataUrl) {
+          url = `/api/media/${id}/file?v=1`;
+          source = 'database';
         } else {
           res.status(400).json({
             error:
-              'Configure SANITY_API_TOKEN in Environment Variables to store uploaded media assets permanently.',
+              'Files over 4 MB on serverless require SANITY_API_TOKEN in Environment Variables for CDN storage.',
           });
           return;
         }
@@ -1696,8 +1965,11 @@ export function createApiApp(): express.Express {
 
       const now = new Date().toISOString();
       await dbRun(
-        `INSERT INTO media_assets (id, file_name, original_name, mime_type, size_bytes, url, alt_text, source, uploaded_by, uploaded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        `INSERT INTO media_assets (
+          id, file_name, original_name, mime_type, size_bytes, url, alt_text,
+          title, caption, description, category, focal_x, focal_y, width, height,
+          sha256, version, content_data_url, source, uploaded_by, uploaded_at, updated_at, updated_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 50, 50, $12, $13, $14, 1, $15, $16, $17, $18, $19, $20)`,
         [
           id,
           generatedName,
@@ -1706,9 +1978,19 @@ export function createApiApp(): express.Express {
           req.file.size,
           url,
           altText,
+          title,
+          caption,
+          description,
+          category,
+          dims.width,
+          dims.height,
+          sha256,
+          contentDataUrl,
           source,
           req.adminUser!.username,
           now,
+          now,
+          req.adminUser!.username,
         ]
       );
 
@@ -1718,39 +2000,85 @@ export function createApiApp(): express.Express {
         action: 'upload_media',
         contentType: 'media',
         recordId: id,
-        recordTitle: req.file.originalname,
+        recordTitle: title || req.file.originalname,
         result: 'success',
         details: `Uploaded ${req.file.originalname} (${Math.round(req.file.size / 1024)} KB) via ${source}.`,
         ipAddress: getClientIp(req),
       });
 
+      const created = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
       res.status(201).json({
         item: {
-          id,
-          fileName: generatedName,
-          originalName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          sizeBytes: req.file.size,
-          url,
-          altText,
-          source,
-          uploadedBy: req.adminUser!.username,
-          uploadedAt: now,
+          ...mapMediaRow(created),
+          duplicateOf: duplicateRow ? duplicateRow.original_name : null,
         },
+        duplicateWarning: duplicateRow
+          ? `An identical file ("${duplicateRow.original_name}") already exists in the Media Library.`
+          : null,
       });
     });
   });
 
   app.put('/api/media/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
     const { id } = req.params;
-    const altText = sanitizeString(req.body?.altText, 300);
     const existing = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
     if (!existing) {
       res.status(404).json({ error: 'Media asset not found.' });
       return;
     }
 
-    await dbRun('UPDATE media_assets SET alt_text = $1 WHERE id = $2', [altText, id]);
+    const altText =
+      req.body?.altText !== undefined ? sanitizeString(req.body.altText, 300) : existing.alt_text || '';
+    const title =
+      req.body?.title !== undefined ? sanitizeString(req.body.title, 180) : existing.title || '';
+    const caption =
+      req.body?.caption !== undefined ? sanitizeString(req.body.caption, 400) : existing.caption || '';
+    const description =
+      req.body?.description !== undefined
+        ? sanitizeString(req.body.description, 1000)
+        : existing.description || '';
+    const category =
+      req.body?.category !== undefined
+        ? sanitizeString(req.body.category, 60) || 'general'
+        : existing.category || 'general';
+    const originalName =
+      req.body?.originalName !== undefined && sanitizeString(req.body.originalName, 180)
+        ? sanitizeString(req.body.originalName, 180).replace(/[/\\<>:"|?*]/g, '')
+        : existing.original_name;
+
+    const focalX =
+      typeof req.body?.focalPoint?.x === 'number'
+        ? Math.max(0, Math.min(100, req.body.focalPoint.x))
+        : typeof existing.focal_x === 'number'
+          ? existing.focal_x
+          : 50;
+    const focalY =
+      typeof req.body?.focalPoint?.y === 'number'
+        ? Math.max(0, Math.min(100, req.body.focalPoint.y))
+        : typeof existing.focal_y === 'number'
+          ? existing.focal_y
+          : 50;
+
+    const now = new Date().toISOString();
+    await dbRun(
+      `UPDATE media_assets
+       SET alt_text = $1, title = $2, caption = $3, description = $4, category = $5,
+           original_name = $6, focal_x = $7, focal_y = $8, updated_at = $9, updated_by = $10
+       WHERE id = $11`,
+      [
+        altText,
+        title,
+        caption,
+        description,
+        category,
+        originalName,
+        focalX,
+        focalY,
+        now,
+        req.adminUser!.username,
+        id,
+      ]
+    );
 
     await logAudit({
       adminUsername: req.adminUser!.username,
@@ -1758,32 +2086,27 @@ export function createApiApp(): express.Express {
       action: 'update_media',
       contentType: 'media',
       recordId: id,
-      recordTitle: existing.original_name,
+      recordTitle: title || originalName,
       result: 'success',
-      details: `Updated alt text for ${existing.original_name}.`,
+      details: `Updated metadata (title/alt/caption/category/focal point) for "${originalName}".`,
       ipAddress: getClientIp(req),
     });
 
-    res.json({
-      item: {
-        id: existing.id,
-        fileName: existing.file_name,
-        originalName: existing.original_name,
-        mimeType: existing.mime_type,
-        sizeBytes: Number(existing.size_bytes),
-        url: existing.url,
-        altText,
-        source: existing.source,
-        uploadedBy: existing.uploaded_by,
-        uploadedAt: existing.uploaded_at,
-      },
-    });
+    const updated = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
+    const usageMap = await computeMediaUsageMap([updated]);
+    res.json({ item: mapMediaRow(updated, usageMap) });
   });
 
   app.post('/api/media/:id/replace', requireAuth, (req: AuthenticatedRequest, res) => {
     mediaUpload.single('file')(req, res, async (err: any) => {
       if (err || !req.file) {
         res.status(400).json({ error: err?.message || 'Replacement file is required.' });
+        return;
+      }
+
+      const safetyErr = validateUploadSafety(req.file.buffer, req.file.mimetype);
+      if (safetyErr) {
+        res.status(400).json({ error: safetyErr });
         return;
       }
 
@@ -1794,9 +2117,13 @@ export function createApiApp(): express.Express {
         return;
       }
 
+      const nextVersion = Number(existing.version || 1) + 1;
       const generatedName = safeFileName(req.file.originalname, req.file.mimetype);
+      const sha256 = computeSha256(req.file.buffer);
+      const dims = extractImageDimensions(req.file.buffer, req.file.mimetype);
       let newUrl = '';
-      let source: 'sanity' | 'local' = 'local';
+      let source: 'sanity' | 'local' | 'database' = 'local';
+      let contentDataUrl: string | null = null;
 
       if (hasSanityWriteToken()) {
         try {
@@ -1816,16 +2143,24 @@ export function createApiApp(): express.Express {
       }
 
       if (!newUrl) {
+        if (req.file.size <= 4 * 1024 * 1024) {
+          contentDataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+        }
         if (!IS_SERVERLESS) {
           if (existing.source === 'local' && existing.file_name) {
             const oldPath = path.join(UPLOADS_DIR, existing.file_name);
             if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
           }
           fs.writeFileSync(path.join(UPLOADS_DIR, generatedName), req.file.buffer);
-          newUrl = `/uploads/${generatedName}`;
+          newUrl = `/api/media/${id}/file?v=${nextVersion}`;
+          source = 'local';
+        } else if (contentDataUrl) {
+          newUrl = `/api/media/${id}/file?v=${nextVersion}`;
+          source = 'database';
         } else {
           res.status(400).json({
-            error: 'Configure SANITY_API_TOKEN in Environment Variables to replace media assets.',
+            error:
+              'Files over 4 MB on serverless require SANITY_API_TOKEN in Environment Variables.',
           });
           return;
         }
@@ -1834,10 +2169,30 @@ export function createApiApp(): express.Express {
       const now = new Date().toISOString();
       await dbRun(
         `UPDATE media_assets
-         SET file_name = $1, original_name = $2, mime_type = $3, size_bytes = $4, url = $5, source = $6, uploaded_at = $7
-         WHERE id = $8`,
-        [generatedName, req.file.originalname, req.file.mimetype, req.file.size, newUrl, source, now, id]
+         SET file_name = $1, original_name = $2, mime_type = $3, size_bytes = $4, url = $5,
+             source = $6, width = $7, height = $8, sha256 = $9, version = $10,
+             content_data_url = $11, updated_at = $12, updated_by = $13
+         WHERE id = $14`,
+        [
+          generatedName,
+          req.file.originalname,
+          req.file.mimetype,
+          req.file.size,
+          newUrl,
+          source,
+          dims.width,
+          dims.height,
+          sha256,
+          nextVersion,
+          contentDataUrl,
+          now,
+          req.adminUser!.username,
+          id,
+        ]
       );
+
+      // Propagate new versioned URL across all CMS documents and global SEO settings
+      const updatedRefs = await propagateMediaUrlChange(id, existing.url, newUrl);
 
       await logAudit({
         adminUsername: req.adminUser!.username,
@@ -1845,26 +2200,15 @@ export function createApiApp(): express.Express {
         action: 'replace_media',
         contentType: 'media',
         recordId: id,
-        recordTitle: req.file.originalname,
+        recordTitle: existing.title || req.file.originalname,
         result: 'success',
-        details: `Replaced asset with ${req.file.originalname}.`,
+        details: `Replaced asset with ${req.file.originalname} (v${nextVersion}); propagated to ${updatedRefs} record(s).`,
         ipAddress: getClientIp(req),
       });
 
-      res.json({
-        item: {
-          id,
-          fileName: generatedName,
-          originalName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          sizeBytes: req.file.size,
-          url: newUrl,
-          altText: existing.alt_text,
-          source,
-          uploadedBy: req.adminUser!.username,
-          uploadedAt: now,
-        },
-      });
+      const updated = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
+      const usageMap = await computeMediaUsageMap([updated]);
+      res.json({ item: mapMediaRow(updated, usageMap), updatedRefs });
     });
   });
 
@@ -1889,7 +2233,7 @@ export function createApiApp(): express.Express {
       action: 'delete_media',
       contentType: 'media',
       recordId: id,
-      recordTitle: existing.original_name,
+      recordTitle: existing.title || existing.original_name,
       result: 'success',
       details: `Deleted media asset "${existing.original_name}".`,
       ipAddress: getClientIp(req),
@@ -1922,6 +2266,7 @@ export function createApiApp(): express.Express {
       siteDescription: sanitizeString(req.body?.siteDescription ?? current.siteDescription, 320),
       siteUrl: sanitizeString(req.body?.siteUrl ?? current.siteUrl, 240),
       defaultOgImage: sanitizeString(req.body?.defaultOgImage ?? current.defaultOgImage, 500),
+      defaultOgMediaId: sanitizeString(req.body?.defaultOgMediaId ?? current.defaultOgMediaId, 80) || undefined,
       robotsDirectives: sanitizeString(req.body?.robotsDirectives ?? current.robotsDirectives, 120),
       sitemapEnabled: Boolean(req.body?.sitemapEnabled ?? current.sitemapEnabled ?? true),
       sessionTimeoutHours: Math.max(
@@ -1955,164 +2300,8 @@ export function createApiApp(): express.Express {
   });
 
   app.get('/api/seo/audit', requireAuth, async (_req, res) => {
-    const issues: SeoIssue[] = [];
-    const seenTitles = new Map<string, { type: string; id: string; title: string }>();
-
-    const checkSeoEntity = (entityType: string, id: string, entityTitle: string, seo: any) => {
-      const metaTitle = (seo?.metaTitle || '').trim();
-      const metaDesc = (seo?.metaDescription || '').trim();
-
-      if (!metaTitle) {
-        issues.push({
-          id: `${id}-missing-title`,
-          severity: 'error',
-          entityType,
-          entityId: id,
-          entityTitle,
-          field: 'metaTitle',
-          message: 'Missing meta title.',
-        });
-      } else {
-        if (metaTitle.length < 25) {
-          issues.push({
-            id: `${id}-short-title`,
-            severity: 'warning',
-            entityType,
-            entityId: id,
-            entityTitle,
-            field: 'metaTitle',
-            message: `Meta title is short (${metaTitle.length} chars; recommended 30–60).`,
-          });
-        } else if (metaTitle.length > 65) {
-          issues.push({
-            id: `${id}-long-title`,
-            severity: 'warning',
-            entityType,
-            entityId: id,
-            entityTitle,
-            field: 'metaTitle',
-            message: `Meta title may be truncated in search results (${metaTitle.length} chars; recommended ≤ 60).`,
-          });
-        }
-
-        const key = metaTitle.toLowerCase();
-        if (seenTitles.has(key)) {
-          const prev = seenTitles.get(key)!;
-          issues.push({
-            id: `${id}-dup-title`,
-            severity: 'error',
-            entityType,
-            entityId: id,
-            entityTitle,
-            field: 'metaTitle',
-            message: `Duplicate meta title also used by ${prev.type} "${prev.title}".`,
-          });
-        } else {
-          seenTitles.set(key, { type: entityType, id, title: entityTitle });
-        }
-      }
-
-      if (!metaDesc) {
-        issues.push({
-          id: `${id}-missing-desc`,
-          severity: 'error',
-          entityType,
-          entityId: id,
-          entityTitle,
-          field: 'metaDescription',
-          message: 'Missing meta description.',
-        });
-      } else if (metaDesc.length < 70) {
-        issues.push({
-          id: `${id}-short-desc`,
-          severity: 'warning',
-          entityType,
-          entityId: id,
-          entityTitle,
-          field: 'metaDescription',
-          message: `Meta description is brief (${metaDesc.length} chars; recommended 120–160).`,
-        });
-      } else if (metaDesc.length > 165) {
-        issues.push({
-          id: `${id}-long-desc`,
-          severity: 'warning',
-          entityType,
-          entityId: id,
-          entityTitle,
-          field: 'metaDescription',
-          message: `Meta description exceeds 165 characters (${metaDesc.length} chars).`,
-        });
-      }
-    };
-
-    const pages = await listDocuments<WebsitePage>('page');
-    for (const p of pages) {
-      checkSeoEntity('page', p.id, p.title, p.seo);
-      const h1s = (p.blocks || []).filter((b) => b.type === 'heading' && b.level === 1);
-      if (h1s.length === 0) {
-        issues.push({
-          id: `${p.id}-no-h1`,
-          severity: 'error',
-          entityType: 'page',
-          entityId: p.id,
-          entityTitle: p.title,
-          field: 'headings',
-          message: 'Page has no H1 heading block.',
-        });
-      } else if (h1s.length > 1) {
-        issues.push({
-          id: `${p.id}-multi-h1`,
-          severity: 'warning',
-          entityType: 'page',
-          entityId: p.id,
-          entityTitle: p.title,
-          field: 'headings',
-          message: `Page contains ${h1s.length} H1 headings (best practice is a single H1).`,
-        });
-      }
-      for (const b of p.blocks || []) {
-        if (b.type === 'image' && b.imageUrl && !(b.imageAlt || '').trim()) {
-          issues.push({
-            id: `${p.id}-img-alt-${b.id}`,
-            severity: 'warning',
-            entityType: 'page',
-            entityId: p.id,
-            entityTitle: p.title,
-            field: 'imageAlt',
-            message: 'An image block on this page is missing alt text.',
-          });
-        }
-      }
-    }
-
-    for (const type of ['project', 'service', 'solution', 'article'] as const) {
-      const docs = await listDocuments<any>(type);
-      for (const d of docs) {
-        checkSeoEntity(type, d.id, getRecordTitle(d), d.seo);
-      }
-    }
-
-    const mediaRows = await dbAll<{ id: string; original_name: string }>(
-      "SELECT id, original_name FROM media_assets WHERE mime_type LIKE 'image/%' AND trim(alt_text) = ''"
-    );
-    for (const m of mediaRows) {
-      issues.push({
-        id: `${m.id}-media-alt`,
-        severity: 'warning',
-        entityType: 'media',
-        entityId: m.id,
-        entityTitle: m.original_name,
-        field: 'altText',
-        message: 'Uploaded image in Media Library is missing alt text.',
-      });
-    }
-
-    res.json({
-      issues,
-      errorCount: issues.filter((i) => i.severity === 'error').length,
-      warningCount: issues.filter((i) => i.severity === 'warning').length,
-      checkedAt: new Date().toISOString(),
-    });
+    const audit = await runSeoAudit();
+    res.json(audit);
   });
 
   // ============================================================

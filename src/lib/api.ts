@@ -69,6 +69,15 @@ export async function apiRequest<T>(
   return data as T;
 }
 
+export const apiFetch = apiRequest;
+
+export async function apiUpload<T>(url: string, formData: FormData): Promise<T> {
+  return apiRequest<T>(url, {
+    method: 'POST',
+    body: formData,
+  });
+}
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);

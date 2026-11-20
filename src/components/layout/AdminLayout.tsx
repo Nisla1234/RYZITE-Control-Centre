@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -21,28 +21,32 @@ import {
   CheckCircle2,
   AlertCircle,
   Info,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { AdminAvatar } from '../ui/AdminAvatar';
+import { apiFetch } from '../../lib/api';
+import type { SeoAuditResult } from '../../types/cms';
 
 interface NavItem {
   label: string;
   to: string;
   icon: React.ComponentType<{ className?: string }>;
   group: 'overview' | 'content' | 'growth' | 'system';
+  badgeKey?: keyof SeoAuditResult['moduleCounts'];
 }
 
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', to: '/admin/dashboard/', icon: LayoutDashboard, group: 'overview' },
-  { label: 'Website Pages', to: '/admin/pages/', icon: FileText, group: 'content' },
-  { label: 'Portfolio', to: '/admin/portfolio/', icon: Briefcase, group: 'content' },
-  { label: 'Services', to: '/admin/services/', icon: Wrench, group: 'content' },
-  { label: 'Solutions', to: '/admin/solutions/', icon: Layers, group: 'content' },
+  { label: 'Website Pages', to: '/admin/pages/', icon: FileText, group: 'content', badgeKey: 'page' },
+  { label: 'Portfolio', to: '/admin/portfolio/', icon: Briefcase, group: 'content', badgeKey: 'portfolio' },
+  { label: 'Services', to: '/admin/services/', icon: Wrench, group: 'content', badgeKey: 'service' },
+  { label: 'Solutions', to: '/admin/solutions/', icon: Layers, group: 'content', badgeKey: 'solution' },
   { label: 'Team', to: '/admin/team/', icon: Users, group: 'content' },
-  { label: 'Articles & Blog', to: '/admin/articles/', icon: BookOpen, group: 'content' },
+  { label: 'Articles & Blog', to: '/admin/articles/', icon: BookOpen, group: 'content', badgeKey: 'article' },
   { label: 'Testimonials', to: '/admin/testimonials/', icon: MessageSquareQuote, group: 'content' },
-  { label: 'Media Library', to: '/admin/media/', icon: ImageIcon, group: 'content' },
-  { label: 'SEO Centre', to: '/admin/seo/', icon: SearchCheck, group: 'growth' },
+  { label: 'Media Library', to: '/admin/media/', icon: ImageIcon, group: 'content', badgeKey: 'media' },
+  { label: 'SEO Centre', to: '/admin/seo/', icon: SearchCheck, group: 'growth', badgeKey: 'total' },
   { label: 'Analytics (GA4)', to: '/admin/analytics/', icon: BarChart3, group: 'growth' },
   { label: 'Activity Logs', to: '/admin/activity/', icon: History, group: 'system' },
   { label: 'Settings', to: '/admin/settings/', icon: Settings, group: 'system' },
@@ -60,8 +64,21 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [quickJump, setQuickJump] = useState('');
   const [showJumpResults, setShowJumpResults] = useState(false);
+  const [moduleCounts, setModuleCounts] = useState<SeoAuditResult['moduleCounts'] | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let active = true;
+    apiFetch<SeoAuditResult>('/api/seo/audit')
+      .then((res) => {
+        if (active && res?.moduleCounts) setModuleCounts(res.moduleCounts);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [location.pathname]);
 
   const currentNav = NAV_ITEMS.find((item) => location.pathname.startsWith(item.to.replace(/\/$/, '')));
   const pageTitle = currentNav?.label || 'Control Centre';
@@ -87,21 +104,33 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
           <nav className="space-y-0.5 px-2">
             {items.map((item) => {
               const Icon = item.icon;
+              const badgeCount =
+                item.badgeKey && moduleCounts ? moduleCounts[item.badgeKey] || 0 : 0;
               return (
                 <NavLink
                   key={item.to}
                   to={item.to}
                   onClick={() => setMobileMenuOpen(false)}
                   className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
+                    `flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
                       isActive
                         ? 'bg-[#1438B8] text-white'
                         : 'text-[#CBD9F2] hover:bg-[#1B3266] hover:text-white'
                     }`
                   }
                 >
-                  <Icon className="h-4 w-4 shrink-0 opacity-90" />
-                  <span className="truncate">{item.label}</span>
+                  <span className="flex items-center gap-3 min-w-0">
+                    <Icon className="h-4 w-4 shrink-0 opacity-90" />
+                    <span className="truncate">{item.label}</span>
+                  </span>
+                  {badgeCount > 0 && (
+                    <span
+                      title={`${badgeCount} unresolved SEO warning(s)`}
+                      className="shrink-0 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 px-1.5 py-0.5 text-[10px] font-bold leading-none"
+                    >
+                      {badgeCount}
+                    </span>
+                  )}
                 </NavLink>
               );
             })}
@@ -149,8 +178,17 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         {/* Navigation Links */}
         <div className="flex-1 overflow-y-auto py-4">{renderNavGroups()}</div>
 
-        {/* Sign Out Footer */}
-        <div className="border-t border-white/10 p-3">
+        {/* Footer Actions */}
+        <div className="border-t border-white/10 p-3 space-y-1">
+          <a
+            href="/"
+            target="_blank"
+            rel="noreferrer"
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-[#CBD9F2] transition-colors hover:bg-[#1B3266] hover:text-white"
+          >
+            <ExternalLink className="h-4 w-4 shrink-0" />
+            <span>View Live Website</span>
+          </a>
           <button
             type="button"
             onClick={handleLogout}

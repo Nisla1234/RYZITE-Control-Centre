@@ -295,8 +295,40 @@ export async function initDatabase(): Promise<void> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_access_requests_status ON admin_access_requests(status);
+
+      CREATE TABLE IF NOT EXISTS cms_revisions (
+        id TEXT PRIMARY KEY,
+        doc_type TEXT NOT NULL,
+        doc_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cms_revisions_doc ON cms_revisions(doc_type, doc_id, created_at);
     `);
-    await pool.query('ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS avatar_url TEXT');
+    await pool.query(`
+      ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+      ALTER TABLE cms_documents ADD COLUMN IF NOT EXISTS published_json TEXT;
+      ALTER TABLE cms_documents ADD COLUMN IF NOT EXISTS published_at TEXT;
+      ALTER TABLE cms_documents ADD COLUMN IF NOT EXISTS published_by TEXT;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS title TEXT DEFAULT '';
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS caption TEXT DEFAULT '';
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general';
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS focal_x DOUBLE PRECISION DEFAULT 50;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS focal_y DOUBLE PRECISION DEFAULT 50;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS width INTEGER;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS height INTEGER;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS sha256 TEXT;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS content_data_url TEXT;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS updated_at TEXT;
+      ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS updated_by TEXT;
+    `);
   } else {
     const db = await getSqliteDb();
     db.exec(`
@@ -399,13 +431,56 @@ export async function initDatabase(): Promise<void> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_access_requests_status ON admin_access_requests(status);
+
+      CREATE TABLE IF NOT EXISTS cms_revisions (
+        id TEXT PRIMARY KEY,
+        doc_type TEXT NOT NULL,
+        doc_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cms_revisions_doc ON cms_revisions(doc_type, doc_id, created_at);
     `);
 
-    const adminCols = db.prepare('PRAGMA table_info(admin_users)').all() as { name: string }[];
-    if (!adminCols.some((c) => c.name === 'avatar_url')) {
-      db.exec('ALTER TABLE admin_users ADD COLUMN avatar_url TEXT');
-    }
+    const ensureSqliteColumn = (table: string, col: string, def: string) => {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === col)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+      }
+    };
+
+    ensureSqliteColumn('admin_users', 'avatar_url', 'TEXT');
+    ensureSqliteColumn('cms_documents', 'published_json', 'TEXT');
+    ensureSqliteColumn('cms_documents', 'published_at', 'TEXT');
+    ensureSqliteColumn('cms_documents', 'published_by', 'TEXT');
+    ensureSqliteColumn('media_assets', 'title', "TEXT DEFAULT ''");
+    ensureSqliteColumn('media_assets', 'caption', "TEXT DEFAULT ''");
+    ensureSqliteColumn('media_assets', 'description', "TEXT DEFAULT ''");
+    ensureSqliteColumn('media_assets', 'category', "TEXT DEFAULT 'general'");
+    ensureSqliteColumn('media_assets', 'focal_x', 'REAL DEFAULT 50');
+    ensureSqliteColumn('media_assets', 'focal_y', 'REAL DEFAULT 50');
+    ensureSqliteColumn('media_assets', 'width', 'INTEGER');
+    ensureSqliteColumn('media_assets', 'height', 'INTEGER');
+    ensureSqliteColumn('media_assets', 'sha256', 'TEXT');
+    ensureSqliteColumn('media_assets', 'version', 'INTEGER DEFAULT 1');
+    ensureSqliteColumn('media_assets', 'content_data_url', 'TEXT');
+    ensureSqliteColumn('media_assets', 'updated_at', 'TEXT');
+    ensureSqliteColumn('media_assets', 'updated_by', 'TEXT');
   }
+
+  // Non-destructively backfill published_json for already-published documents
+  await dbRun(
+    `UPDATE cms_documents
+     SET published_json = data_json,
+         published_at = COALESCE(published_at, updated_at),
+         published_by = COALESCE(published_by, updated_by)
+     WHERE status = 'published' AND published_json IS NULL`
+  );
 
   // Provision or securely sync the administrator account from server-side env vars
   const envUsername = cleanEnvValue(process.env.ADMIN_USERNAME, true);
@@ -511,15 +586,24 @@ export async function initDatabase(): Promise<void> {
     lastCredentialSyncStatus = 'disabled';
   }
 
-  // Provision default site settings if empty
-  const existingSettings = await dbGet('SELECT key FROM site_settings WHERE key = $1', ['global_seo']);
+  // Provision default site settings if empty, or upgrade legacy placeholder domain/long title
+  const rawEnvSiteUrl = cleanEnvValue(process.env.SITE_URL, true);
+  const resolvedDefaultSiteUrl =
+    rawEnvSiteUrl && !rawEnvSiteUrl.includes('your-ryzite-domain') && rawEnvSiteUrl !== 'https://ryzite.com'
+      ? rawEnvSiteUrl
+      : 'https://ryzite.lk';
+
+  const existingSettings = await dbGet<{ value_json: string }>(
+    'SELECT value_json FROM site_settings WHERE key = $1',
+    ['global_seo']
+  );
   if (!existingSettings) {
     const now = new Date().toISOString();
     const defaults = {
-      siteTitle: 'RYZITE — Enterprise Digital Engineering & Technology Solutions',
+      siteTitle: 'RYZITE — Digital Engineering & Technology Solutions',
       siteDescription:
         'RYZITE designs and builds high-reliability web platforms, cloud architectures, and custom software solutions for ambitious organisations.',
-      siteUrl: process.env.SITE_URL || 'https://ryzite.com',
+      siteUrl: resolvedDefaultSiteUrl,
       defaultOgImage: '/assets/branding/ryzite-logo.png',
       robotsDirectives: 'index, follow',
       sitemapEnabled: true,
@@ -532,6 +616,31 @@ export async function initDatabase(): Promise<void> {
        VALUES ('global_seo', $1, $2, 'system')`,
       [JSON.stringify(defaults), now]
     );
+  } else {
+    try {
+      const parsed = JSON.parse(existingSettings.value_json);
+      let changed = false;
+      if (
+        !parsed.siteUrl ||
+        parsed.siteUrl === 'https://ryzite.com' ||
+        parsed.siteUrl.includes('your-ryzite-domain')
+      ) {
+        parsed.siteUrl = resolvedDefaultSiteUrl;
+        changed = true;
+      }
+      if (parsed.siteTitle === 'RYZITE — Enterprise Digital Engineering & Technology Solutions') {
+        parsed.siteTitle = 'RYZITE — Digital Engineering & Technology Solutions';
+        changed = true;
+      }
+      if (changed) {
+        await dbRun(
+          `UPDATE site_settings SET value_json = $1 WHERE key = 'global_seo'`,
+          [JSON.stringify(parsed)]
+        );
+      }
+    } catch {
+      // Ignore malformed settings JSON
+    }
   }
 
   // Seed initial staging CMS records only if cms_documents is completely empty
@@ -545,8 +654,8 @@ export async function initDatabase(): Promise<void> {
 async function seedStagingDocuments() {
   const now = new Date().toISOString();
   const insertSql = `
-    INSERT INTO cms_documents (id, doc_type, status, data_json, updated_at, updated_by)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO cms_documents (id, doc_type, status, data_json, published_json, published_at, published_by, updated_at, updated_by)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
   `;
 
   const pages = [
@@ -556,24 +665,71 @@ async function seedStagingDocuments() {
       slug: '/',
       status: 'published',
       blocks: [
-        { id: 'b1', type: 'heading', level: 1, text: 'Engineering Resilient Digital Platforms for Modern Enterprises' },
-        { id: 'b2', type: 'paragraph', text: 'RYZITE partners with forward-thinking organisations to architect scalable web applications, cloud infrastructure, and tailored software systems.' },
-        { id: 'b3', type: 'heading', level: 2, text: 'Built for Measurable Operational Velocity' },
-        { id: 'b4', type: 'list', items: ['Full-stack cloud and edge web engineering', 'Headless CMS and digital commerce modernisation', 'Security-first architecture and observability'] },
-        { id: 'b5', type: 'cta', ctaHeading: 'Ready to modernise your digital stack?', ctaBody: 'Speak with RYZITE engineering leadership to scope your next platform release.', ctaButtonText: 'Schedule a Technical Briefing', ctaButtonUrl: '/contact' },
+        {
+          id: 'b1',
+          type: 'hero',
+          visible: true,
+          eyebrow: 'RYZITE DIGITAL ENGINEERING',
+          text: 'Engineering Resilient Digital Platforms for Modern Enterprises',
+          subtitle:
+            'RYZITE partners with forward-thinking organisations to architect scalable web applications, cloud infrastructure, and tailored software systems.',
+          primaryButtonText: 'Explore Services',
+          primaryButtonUrl: '/services',
+          secondaryButtonText: 'Contact Leadership',
+          secondaryButtonUrl: '/contact',
+        },
+        {
+          id: 'b2',
+          type: 'stats',
+          visible: true,
+          text: 'Proven Delivery Across Mission-Critical Systems',
+          stats: [
+            { value: '99.95%', label: 'Platform Reliability', note: 'Production uptime target' },
+            { value: '40+', label: 'Enterprise Releases', note: 'Cloud & web systems' },
+            { value: '< 120ms', label: 'Edge Response', note: 'Global CDN architecture' },
+          ],
+        },
+        {
+          id: 'b3',
+          type: 'heading',
+          visible: true,
+          level: 2,
+          text: 'Built for Measurable Operational Velocity',
+        },
+        {
+          id: 'b4',
+          type: 'list',
+          visible: true,
+          items: [
+            'Full-stack cloud and edge web engineering',
+            'Headless CMS and digital commerce modernisation',
+            'Security-first architecture and observability',
+          ],
+        },
+        {
+          id: 'b5',
+          type: 'cta',
+          visible: true,
+          ctaHeading: 'Ready to modernise your digital stack?',
+          ctaBody: 'Speak with RYZITE engineering leadership to scope your next platform release.',
+          ctaButtonText: 'Schedule a Technical Briefing',
+          ctaButtonUrl: '/contact',
+        },
       ],
       seo: {
-        metaTitle: 'RYZITE | Enterprise Digital Engineering & Cloud Platforms',
-        metaDescription: 'RYZITE builds high-performance web applications, cloud systems, and tailored software platforms for modern enterprises.',
-        canonicalUrl: 'https://ryzite.com/',
-        ogTitle: 'RYZITE — Enterprise Digital Engineering',
+        metaTitle: 'RYZITE | Digital Engineering & Cloud Platforms',
+        metaDescription:
+          'RYZITE builds high-performance web applications, cloud systems, and tailored software platforms for modern enterprises across Sri Lanka and globally.',
+        canonicalUrl: 'https://ryzite.lk/',
+        ogTitle: 'RYZITE — Digital Engineering & Cloud Platforms',
         ogDescription: 'High-performance web applications and cloud architecture engineered by RYZITE.',
-        ogImage: '',
+        ogImage: '/assets/branding/ryzite-logo.png',
         noIndex: false,
       },
       updatedAt: now,
       updatedBy: 'admin',
       publishedAt: now,
+      publishedBy: 'admin',
     },
     {
       id: 'page-about',
@@ -581,26 +737,29 @@ async function seedStagingDocuments() {
       slug: '/about',
       status: 'published',
       blocks: [
-        { id: 'b1', type: 'heading', level: 1, text: 'Precision Engineering Driven by Long-Term Outcomes' },
-        { id: 'b2', type: 'paragraph', text: 'Founded by systems architects and product designers, RYZITE delivers software that balances architectural discipline with intuitive human experience.' },
+        { id: 'b1', type: 'heading', visible: true, level: 1, text: 'Precision Engineering Driven by Long-Term Outcomes' },
+        { id: 'b2', type: 'paragraph', visible: true, text: 'Founded by systems architects and product designers, RYZITE delivers software that balances architectural discipline with intuitive human experience.' },
       ],
       seo: {
-        metaTitle: 'About RYZITE | Our Engineering Philosophy & Leadership',
-        metaDescription: 'Learn how RYZITE combines systems engineering, cloud reliability, and product design to deliver enterprise software.',
-        canonicalUrl: 'https://ryzite.com/about',
+        metaTitle: 'About RYZITE | Engineering Philosophy & Leadership',
+        metaDescription:
+          'Learn how RYZITE combines systems engineering, cloud reliability, and product design to deliver resilient enterprise software and digital platforms.',
+        canonicalUrl: 'https://ryzite.lk/about',
         ogTitle: 'About RYZITE',
         ogDescription: 'Systems engineering and digital product leadership at RYZITE.',
-        ogImage: '',
+        ogImage: '/assets/branding/ryzite-logo.png',
         noIndex: false,
       },
       updatedAt: now,
       updatedBy: 'admin',
       publishedAt: now,
+      publishedBy: 'admin',
     },
   ];
 
   for (const p of pages) {
-    await dbRun(insertSql, [p.id, 'page', p.status, JSON.stringify(p), now, 'admin']);
+    const json = JSON.stringify(p);
+    await dbRun(insertSql, [p.id, 'page', p.status, json, json, now, 'admin', now, 'admin']);
   }
 }
 
