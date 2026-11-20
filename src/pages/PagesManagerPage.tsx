@@ -482,7 +482,7 @@ export function PagesManagerPage() {
           <div className="flex flex-wrap items-center gap-2">
             {editing.publishedAt && (
               <a
-                href={editing.slug === '/' ? '/' : editing.slug}
+                href={`https://ryzite.lk${editing.slug === '/' ? '/' : editing.slug.startsWith('/') ? editing.slug : `/${editing.slug}`}`}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFEE] hover:bg-[#F4F7FC] px-3 py-2 text-xs font-semibold text-[#334155]"
@@ -1400,12 +1400,12 @@ export function PagesManagerPage() {
             />
           </div>
           <a
-            href="/"
+            href="https://ryzite.lk/"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1438B8] hover:underline"
           >
-            <ExternalLink className="w-3.5 h-3.5" /> Open Live Public Website
+            <ExternalLink className="w-3.5 h-3.5" /> Open Live Public Website (ryzite.lk)
           </a>
         </div>
 
@@ -1503,7 +1503,7 @@ export function PagesManagerPage() {
                           </button>
                           {p.publishedAt && (
                             <a
-                              href={p.slug === '/' ? '/' : p.slug}
+                              href={`https://ryzite.lk${p.slug === '/' ? '/' : p.slug.startsWith('/') ? p.slug : `/${p.slug}`}`}
                               target="_blank"
                               rel="noreferrer"
                               title="Open live public page in new tab"

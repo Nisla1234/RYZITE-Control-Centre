@@ -5,7 +5,6 @@ import {
   Eye,
   FileEdit,
   Globe,
-  Layers,
   Loader2,
   Monitor,
   RefreshCw,
@@ -15,11 +14,9 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import type { WebsitePage } from '../../types/cms';
-import { PublicSiteShell, type PublicSitePayload } from '../public/PublicSiteShell';
 
 type ViewportMode = 'desktop' | 'tablet' | 'mobile';
 type PreviewSource = 'draft' | 'published';
-type RendererMode = 'astro-live' | 'cms-fallback';
 
 interface PreviewTokenResponse {
   token: string;
@@ -46,27 +43,13 @@ export function VisualPagePreview({
 }: VisualPagePreviewProps) {
   const [viewport, setViewport] = useState<ViewportMode>('desktop');
   const [mode, setMode] = useState<PreviewSource>(initialMode);
-  const [renderer, setRenderer] = useState<RendererMode>('astro-live');
-
-  // Real Astro website iframe state
   const [previewInfo, setPreviewInfo] = useState<PreviewTokenResponse | null>(null);
   const [iframeLoading, setIframeLoading] = useState(true);
   const [iframeError, setIframeError] = useState<string | null>(null);
   const [iframeNonce, setIframeNonce] = useState(0);
 
-  // CMS fallback renderer state
-  const [site, setSite] = useState<PublicSitePayload | null>(null);
-  const [publishedPage, setPublishedPage] = useState<WebsitePage | null>(null);
-  const [fallbackLoading, setFallbackLoading] = useState(false);
-  const [fallbackError, setFallbackError] = useState<string | null>(null);
-  const [previewPath, setPreviewPath] = useState<string>(page.slug || '/');
-
   const normalizedPageSlug =
     ((page.slug || '/').startsWith('/') ? page.slug : `/${page.slug}`).replace(/\/+$/, '') || '/';
-
-  useEffect(() => {
-    setPreviewPath(page.slug || '/');
-  }, [page.id, page.slug]);
 
   const issuePreviewToken = useCallback(async () => {
     setIframeLoading(true);
@@ -82,54 +65,15 @@ export function VisualPagePreview({
       setIframeError(
         err instanceof Error
           ? err.message
-          : 'Unable to generate signed preview token for the main website.'
+          : 'Unable to generate signed preview token for https://ryzite.lk.'
       );
       setIframeLoading(false);
     }
   }, [normalizedPageSlug]);
 
-  const loadFallbackData = useCallback(async () => {
-    setFallbackLoading(true);
-    setFallbackError(null);
-    try {
-      const [siteRes, pageRes] = await Promise.all([
-        fetch('/api/public/site?fresh=1', { cache: 'no-store' }),
-        fetch(`/api/public/page?slug=${encodeURIComponent(normalizedPageSlug)}&fresh=1`, {
-          cache: 'no-store',
-        }),
-      ]);
-      if (!siteRes.ok) {
-        throw new Error(`Failed to load CMS site payload (HTTP ${siteRes.status}).`);
-      }
-      setSite(await siteRes.json());
-      if (pageRes.ok) {
-        const pd = await pageRes.json();
-        setPublishedPage(pd.page || null);
-      } else {
-        setPublishedPage(null);
-      }
-    } catch (err) {
-      setFallbackError(err instanceof Error ? err.message : 'Unable to load fallback preview.');
-    } finally {
-      setFallbackLoading(false);
-    }
-  }, [normalizedPageSlug]);
-
   useEffect(() => {
-    if (renderer === 'astro-live') {
-      issuePreviewToken();
-    } else {
-      loadFallbackData();
-    }
-  }, [renderer, issuePreviewToken, loadFallbackData]);
-
-  const handleRefresh = () => {
-    if (renderer === 'astro-live') {
-      issuePreviewToken();
-    } else {
-      loadFallbackData();
-    }
-  };
+    issuePreviewToken();
+  }, [issuePreviewToken]);
 
   const mainSiteBase = (previewInfo?.mainSiteUrl || 'https://ryzite.lk').replace(/\/$/, '');
   const liveHref =
@@ -146,19 +90,6 @@ export function VisualPagePreview({
         ? 'w-[768px] max-w-full rounded-2xl border-4 border-[#1E293B] shadow-xl'
         : 'w-full rounded-xl border border-[#CBD5E1] shadow-sm';
 
-  const normalizedPreviewPath = (previewPath || '/').replace(/\/+$/, '') || '/';
-  const isViewingEditedSlug =
-    normalizedPreviewPath.toLowerCase() === normalizedPageSlug.toLowerCase();
-
-  const resolvedFallbackPage: WebsitePage | null = isViewingEditedSlug
-    ? mode === 'draft'
-      ? page
-      : publishedPage
-    : site?.pages.find((p) => {
-        const s = ((p.slug || '/').startsWith('/') ? p.slug : `/${p.slug}`).replace(/\/+$/, '') || '/';
-        return s.toLowerCase() === normalizedPreviewPath.toLowerCase();
-      }) || null;
-
   return (
     <div className="space-y-3">
       {/* Top Preview Control Bar */}
@@ -170,7 +101,7 @@ export function VisualPagePreview({
               type="button"
               onClick={() => {
                 setMode('draft');
-                if (renderer === 'astro-live') setIframeLoading(true);
+                setIframeLoading(true);
               }}
               className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
                 mode === 'draft'
@@ -184,7 +115,7 @@ export function VisualPagePreview({
               type="button"
               onClick={() => {
                 setMode('published');
-                if (renderer === 'astro-live') setIframeLoading(true);
+                setIframeLoading(true);
               }}
               className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
                 mode === 'published'
@@ -211,7 +142,7 @@ export function VisualPagePreview({
             ) : (
               <>
                 <Eye className="w-3 h-3" />
-                Live Public Website
+                Live Main Website ({mainSiteBase})
               </>
             )}
           </span>
@@ -260,30 +191,15 @@ export function VisualPagePreview({
           </button>
         </div>
 
-        {/* Right: Renderer Mode + Refresh + Open Live */}
+        {/* Right: Refresh + Open Live */}
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() =>
-              setRenderer((r) => (r === 'astro-live' ? 'cms-fallback' : 'astro-live'))
-            }
-            title="Switch between the real ryzite.lk Astro website iframe and CMS structural fallback"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFEE] bg-white hover:bg-[#F4F7FC] px-2.5 py-1.5 text-xs font-medium text-[#334155]"
-          >
-            <Layers className="w-3.5 h-3.5 text-[#1438B8]" />
-            {renderer === 'astro-live' ? 'Real Site (ryzite.lk)' : 'CMS Fallback'}
-          </button>
-          <button
-            type="button"
-            onClick={handleRefresh}
-            disabled={renderer === 'astro-live' ? iframeLoading : fallbackLoading}
+            onClick={issuePreviewToken}
+            disabled={iframeLoading}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFEE] bg-white hover:bg-[#F4F7FC] px-2.5 py-1.5 text-xs font-medium text-[#334155] disabled:opacity-50"
           >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${
-                (renderer === 'astro-live' ? iframeLoading : fallbackLoading) ? 'animate-spin' : ''
-              }`}
-            />
+            <RefreshCw className={`w-3.5 h-3.5 ${iframeLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
           <a
@@ -313,7 +229,11 @@ export function VisualPagePreview({
         <div className="flex items-center gap-3 text-[11px] text-[#64748B] shrink-0">
           {mode === 'draft' && previewInfo?.expiresAt && (
             <span>
-              Token expires {new Date(previewInfo.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              Token expires{' '}
+              {new Date(previewInfo.expiresAt).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
             </span>
           )}
           <span>
@@ -326,97 +246,63 @@ export function VisualPagePreview({
         </div>
       </div>
 
-      {/* Visual Viewport Container */}
+      {/* Visual Viewport Container (Real ryzite.lk Website Only) */}
       <div className="rounded-2xl border border-[#DDE5F0] bg-[#E2E8F0]/70 p-3 sm:p-5 flex justify-center overflow-x-auto">
         <div
           className={`${frameWidthClass} ${heightClassName} bg-white overflow-hidden transition-all duration-200 relative`}
         >
-          {renderer === 'astro-live' ? (
-            <>
-              {iframeLoading && (
-                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-white/95 text-[#64748B]">
-                  <Loader2 className="w-6 h-6 animate-spin text-[#1438B8]" />
-                  <p className="text-xs font-medium">
-                    Loading {mode === 'draft' ? 'signed draft preview' : 'live website'} from{' '}
-                    <span className="font-mono">{mainSiteBase}</span>…
-                  </p>
-                </div>
-              )}
-
-              {iframeError ? (
-                <div className="h-full flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <AlertCircle className="w-8 h-8 text-rose-500" />
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-[#0F172A]">
-                      Unable to load real website preview
-                    </p>
-                    <p className="text-xs text-[#64748B] max-w-md">{iframeError}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={issuePreviewToken}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] text-white px-3.5 py-2 text-xs font-semibold"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" /> Retry
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRenderer('cms-fallback')}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFEE] bg-white px-3.5 py-2 text-xs font-semibold text-[#334155]"
-                    >
-                      Use CMS Fallback
-                    </button>
-                  </div>
-                </div>
-              ) : iframeSrc ? (
-                <iframe
-                  key={`${iframeSrc}-${iframeNonce}`}
-                  src={iframeSrc}
-                  title={`RYZITE ${mode === 'draft' ? 'Draft' : 'Live'} Preview — ${page.title}`}
-                  className="w-full h-full border-0 bg-white"
-                  onLoad={() => setIframeLoading(false)}
-                  onError={() => {
-                    setIframeLoading(false);
-                    setIframeError(
-                      `The main website (${mainSiteBase}) could not be embedded. Ensure Content-Security-Policy frame-ancestors allows this Admin origin, or open the preview in a new tab.`
-                    );
-                  }}
-                />
-              ) : null}
-            </>
-          ) : (
-            <div className="h-full overflow-y-auto bg-[#F4F7FC]">
-              {fallbackLoading ? (
-                <div className="h-full flex flex-col items-center justify-center gap-2 text-[#64748B]">
-                  <Loader2 className="w-6 h-6 animate-spin text-[#1438B8]" />
-                  <p className="text-xs font-medium">Loading CMS fallback preview…</p>
-                </div>
-              ) : fallbackError ? (
-                <div className="h-full flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <AlertCircle className="w-8 h-8 text-rose-500" />
-                  <p className="text-xs text-[#64748B]">{fallbackError}</p>
-                  <button
-                    type="button"
-                    onClick={loadFallbackData}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] text-white px-3.5 py-2 text-xs font-semibold"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" /> Retry
-                  </button>
-                </div>
-              ) : (
-                <PublicSiteShell
-                  site={site}
-                  activePage={resolvedFallbackPage}
-                  currentPath={previewPath}
-                  loading={false}
-                  isPreview
-                  forceMobileNav={viewport === 'mobile'}
-                  onNavigate={(target) => setPreviewPath(target || '/')}
-                />
-              )}
+          {iframeLoading && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-white/95 text-[#64748B]">
+              <Loader2 className="w-6 h-6 animate-spin text-[#1438B8]" />
+              <p className="text-xs font-medium">
+                Loading {mode === 'draft' ? 'signed draft preview' : 'live website'} from{' '}
+                <span className="font-mono">{mainSiteBase}</span>…
+              </p>
             </div>
           )}
+
+          {iframeError ? (
+            <div className="h-full flex flex-col items-center justify-center gap-3 p-6 text-center">
+              <AlertCircle className="w-8 h-8 text-rose-500" />
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-[#0F172A]">
+                  Unable to load main website preview
+                </p>
+                <p className="text-xs text-[#64748B] max-w-md">{iframeError}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={issuePreviewToken}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] text-white px-3.5 py-2 text-xs font-semibold"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Retry
+                </button>
+                <a
+                  href={mode === 'draft' && previewInfo?.previewUrl ? previewInfo.previewUrl : liveHref}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFEE] bg-white px-3.5 py-2 text-xs font-semibold text-[#334155]"
+                >
+                  Open in New Tab <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+            </div>
+          ) : iframeSrc ? (
+            <iframe
+              key={`${iframeSrc}-${iframeNonce}`}
+              src={iframeSrc}
+              title={`RYZITE ${mode === 'draft' ? 'Draft' : 'Live'} Preview — ${page.title}`}
+              className="w-full h-full border-0 bg-white"
+              onLoad={() => setIframeLoading(false)}
+              onError={() => {
+                setIframeLoading(false);
+                setIframeError(
+                  `The main website (${mainSiteBase}) could not be embedded. Ensure Content-Security-Policy frame-ancestors allows this Admin origin, or open the preview in a new tab.`
+                );
+              }}
+            />
+          ) : null}
         </div>
       </div>
     </div>

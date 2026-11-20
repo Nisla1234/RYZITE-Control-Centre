@@ -181,7 +181,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         {/* Footer Actions */}
         <div className="border-t border-white/10 p-3 space-y-1">
           <a
-            href="/"
+            href="https://ryzite.lk"
             target="_blank"
             rel="noreferrer"
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-[#CBD9F2] transition-colors hover:bg-[#1B3266] hover:text-white"

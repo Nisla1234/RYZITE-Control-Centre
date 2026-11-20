@@ -11,6 +11,11 @@ async function startServer() {
   const app = createApiApp();
   const PORT = Number(process.env.PORT || 3000);
 
+  // Admin-only application: always redirect root URL to /admin/
+  app.get('/', (_req, res) => {
+    res.redirect(302, '/admin/');
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
