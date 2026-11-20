@@ -271,6 +271,14 @@ export async function propagateMediaUrlChange(
   return updatedCount;
 }
 
+export function resolveMediaDeliveryUrl(r: any): string {
+  const version = Number(r.version || 1);
+  if (r.source === 'sanity' && typeof r.url === 'string' && /^https?:\/\//i.test(r.url)) {
+    return r.url;
+  }
+  return `/api/media/${r.id}/file?v=${version}`;
+}
+
 export function mapMediaRow(r: any, usageMap?: Map<string, MediaUsageRef[]>): MediaAsset {
   const usedIn = usageMap?.get(r.id) || [];
   return {
@@ -279,7 +287,7 @@ export function mapMediaRow(r: any, usageMap?: Map<string, MediaUsageRef[]>): Me
     originalName: r.original_name,
     mimeType: r.mime_type,
     sizeBytes: Number(r.size_bytes || 0),
-    url: r.url,
+    url: resolveMediaDeliveryUrl(r),
     altText: r.alt_text || '',
     title: r.title || '',
     caption: r.caption || '',

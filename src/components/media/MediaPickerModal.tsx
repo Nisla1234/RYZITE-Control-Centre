@@ -1,14 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
-  FileText,
-  ImageOff,
   Search,
   Upload,
   X,
 } from 'lucide-react';
 import { apiFetch, apiUpload } from '../../lib/api';
 import type { MediaAsset } from '../../types/cms';
+import { MediaThumbnail } from './MediaThumbnail';
 
 export interface MediaPickerSelection {
   mediaId: string;
@@ -38,7 +37,6 @@ export function MediaPickerModal({
   const [category, setCategory] = useState('all');
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [brokenIds, setBrokenIds] = useState<Record<string, boolean>>({});
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const load = async () => {
@@ -184,7 +182,6 @@ export function MediaPickerModal({
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3.5">
               {filtered.map((item) => {
                 const isImg = item.mimeType.startsWith('image/');
-                const isBroken = brokenIds[item.id];
                 return (
                   <button
                     key={item.id}
@@ -200,31 +197,16 @@ export function MediaPickerModal({
                     }}
                     className="group text-left rounded-xl border border-[#DDE5F0] hover:border-[#1438B8] hover:shadow-md bg-white overflow-hidden transition-all flex flex-col"
                   >
-                    <div className="h-32 w-full bg-[#F4F7FC] flex items-center justify-center overflow-hidden relative">
-                      {isImg && !isBroken ? (
-                        <img
-                          src={item.url}
-                          alt={item.altText || item.originalName}
-                          className="w-full h-full object-cover"
-                          style={{
-                            objectPosition: `${item.focalPoint?.x ?? 50}% ${item.focalPoint?.y ?? 50}%`,
-                          }}
-                          onError={() =>
-                            setBrokenIds((prev) => ({ ...prev, [item.id]: true }))
-                          }
-                        />
-                      ) : isImg && isBroken ? (
-                        <div className="flex flex-col items-center gap-1 text-red-600 px-2 text-center">
-                          <ImageOff className="w-6 h-6" />
-                          <span className="text-[10px] font-medium">Preview unavailable</span>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center gap-1 text-[#1438B8]">
-                          <FileText className="w-8 h-8" />
-                          <span className="text-[10px] font-semibold uppercase">PDF</span>
-                        </div>
-                      )}
-                      <div className="absolute inset-0 bg-[#1438B8]/0 group-hover:bg-[#1438B8]/15 transition-colors flex items-center justify-center">
+                    <div className="h-32 w-full bg-[#F4F7FC] overflow-hidden relative">
+                      <MediaThumbnail
+                        src={item.url}
+                        alt={item.altText || item.originalName}
+                        isPdf={!isImg}
+                        compact
+                        className="w-full h-full"
+                        objectPosition={`${item.focalPoint?.x ?? 50}% ${item.focalPoint?.y ?? 50}%`}
+                      />
+                      <div className="pointer-events-none absolute inset-0 bg-[#1438B8]/0 group-hover:bg-[#1438B8]/15 transition-colors flex items-center justify-center">
                         <span className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md bg-[#1438B8] text-white px-2.5 py-1 text-[11px] font-semibold shadow">
                           <Check className="w-3 h-3" /> Select
                         </span>

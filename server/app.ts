@@ -1508,11 +1508,16 @@ export function createApiApp(): express.Express {
       'website-care-and-maintenance': 'website-care-maintenance.jpeg',
     };
 
+    const mediaIdByFile = new Map<string, string>(
+      mainSiteSeed.media.map(([id, fileName]) => [fileName, id])
+    );
+
     const makeOffering = (kind: 'service' | 'solution', item: readonly [string, string, string]) => {
       const [title, summary, featureText] = item;
       const slug = title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
       const metaTitle = `${title} | RYZITE`;
       const imageFile = kind === 'solution' ? solutionImages[slug] : undefined;
+      const imageMediaId = imageFile ? mediaIdByFile.get(imageFile) : undefined;
       return {
         id: `main-site-${kind}-${slug}`,
         type: kind,
@@ -1522,8 +1527,9 @@ export function createApiApp(): express.Express {
         summary,
         description: summary,
         iconName: kind === 'service' ? 'Megaphone' : 'Code2',
-        imageUrl: imageFile
-          ? `https://raw.githubusercontent.com/Nisla1234/ryzite-website-development/vercel-migration/public/images/solutions/${imageFile}`
+        imageMediaId: imageMediaId || undefined,
+        imageUrl: imageMediaId
+          ? `/api/media/${imageMediaId}/file?v=1`
           : '',
         imageAlt: imageFile ? `${title} — RYZITE technology solution` : '',
         features: featureText.split(';').map((value) => value.trim()).filter(Boolean),
@@ -1822,7 +1828,7 @@ export function createApiApp(): express.Express {
   // MEDIA LIBRARY ENDPOINTS
   // ============================================================
 
-  // Public file delivery endpoint for DB-backed or local media assets
+  // Public file delivery endpoint for DB-backed, local, and proxied main-site media assets
   app.get('/api/media/:id/file', async (req, res) => {
     const { id } = req.params;
     const row = await dbGet<any>('SELECT * FROM media_assets WHERE id = $1', [id]);
@@ -1831,32 +1837,41 @@ export function createApiApp(): express.Express {
       return;
     }
 
-    if (row.source === 'sanity' && row.url && row.url.startsWith('http')) {
+    const sendBinary = (buf: Buffer, mime: string, cacheControl = 'public, max-age=31536000, immutable') => {
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Length', buf.length);
+      res.setHeader('Cache-Control', cacheControl);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (mime === 'image/svg+xml') {
+        res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      }
+      res.send(buf);
+    };
+
+    // Tier 1: Sanity CDN
+    if (row.source === 'sanity' && row.url && /^https?:\/\//i.test(row.url)) {
       res.redirect(302, row.url);
       return;
     }
 
+    // Tier 2: PostgreSQL / SQLite stored binary (serverless-safe, fast, durable)
     if (row.content_data_url && typeof row.content_data_url === 'string') {
       const match = row.content_data_url.match(/^data:([^;]+);base64,(.+)$/);
       if (match) {
         const mime = match[1] || row.mime_type || 'application/octet-stream';
         const buf = Buffer.from(match[2], 'base64');
-        res.setHeader('Content-Type', mime);
-        res.setHeader('Content-Length', buf.length);
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        if (mime === 'image/svg+xml') {
-          res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
-        }
-        res.send(buf);
+        sendBinary(buf, mime);
         return;
       }
     }
 
+    // Tier 3: Local uploads folder (non-serverless dev/VM)
     if (!IS_SERVERLESS && row.file_name) {
       const filePath = path.join(UPLOADS_DIR, row.file_name);
       if (fs.existsSync(filePath)) {
         res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         if (row.mime_type === 'image/svg+xml') {
           res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
         }
@@ -1865,7 +1880,115 @@ export function createApiApp(): express.Express {
       }
     }
 
-    res.status(404).json({ error: 'Media binary is unavailable.' });
+    // Tier 4: Server-side authenticated proxy for main-site / external URLs with automatic DB caching
+    const fetchUpstreamBinary = async (
+      targetUrl: string,
+      headers: Record<string, string> = {}
+    ): Promise<{ buf: Buffer; mime: string } | null> => {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        const upstream = await fetch(targetUrl, {
+          headers,
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!upstream.ok) return null;
+        const ct = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        // Strictly reject HTML / text error or login pages masquerading as images
+        const isBinaryAsset =
+          ct.startsWith('image/') ||
+          ct === 'application/pdf' ||
+          (ct === 'application/octet-stream' && Boolean(row.mime_type && row.mime_type.startsWith('image/')));
+        if (!isBinaryAsset) return null;
+
+        const arrayBuf = await upstream.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        if (buf.length === 0 || buf.length > 10 * 1024 * 1024) return null;
+        const mime = ct === 'application/octet-stream' ? row.mime_type || 'image/png' : ct;
+        return { buf, mime };
+      } catch {
+        return null;
+      }
+    };
+
+    if (typeof row.url === 'string' && /^https?:\/\//i.test(row.url)) {
+      let fetched: { buf: Buffer; mime: string } | null = null;
+      const ghToken = (process.env.GITHUB_TOKEN || process.env.GITHUB_MEDIA_TOKEN || '').trim();
+      const mainSiteUrl = (process.env.MAIN_SITE_URL || '').trim().replace(/\/$/, '');
+      const vercelBypass = (process.env.VERCEL_AUTOMATION_BYPASS_SECRET || '').trim();
+
+      // 4A: Private GitHub raw URL with server-side GITHUB_TOKEN
+      if (!fetched && ghToken && row.url.includes('raw.githubusercontent.com')) {
+        fetched = await fetchUpstreamBinary(row.url, {
+          Authorization: `Bearer ${ghToken}`,
+          Accept: 'application/octet-stream',
+          'User-Agent': 'RYZITE-CMS-Media-Proxy',
+        });
+      }
+
+      // 4B: Main site deployment URL (deriving /images/... path after /public)
+      if (!fetched && mainSiteUrl && row.url.includes('/public/')) {
+        const relPath = row.url.slice(row.url.indexOf('/public/') + '/public'.length);
+        const headers: Record<string, string> = { 'User-Agent': 'RYZITE-CMS-Media-Proxy' };
+        if (vercelBypass) headers['x-vercel-protection-bypass'] = vercelBypass;
+        fetched = await fetchUpstreamBinary(`${mainSiteUrl}${relPath}`, headers);
+      }
+
+      // 4C: Direct public URL fetch (if repo becomes public or URL is a public CDN)
+      if (!fetched) {
+        fetched = await fetchUpstreamBinary(row.url, { 'User-Agent': 'RYZITE-CMS-Media-Proxy' });
+      }
+
+      if (fetched) {
+        // Persist into PostgreSQL/SQLite cache (<= 4MB) so Vercel serverless serves it instantly forever
+        if (fetched.buf.length <= 4 * 1024 * 1024) {
+          try {
+            const dataUrl = `data:${fetched.mime};base64,${fetched.buf.toString('base64')}`;
+            const dims = extractImageDimensions(fetched.buf, fetched.mime);
+            await dbRun(
+              `UPDATE media_assets
+               SET content_data_url = $1,
+                   size_bytes = $2,
+                   width = COALESCE(width, $3),
+                   height = COALESCE(height, $4)
+               WHERE id = $5`,
+              [dataUrl, fetched.buf.length, dims.width, dims.height, id]
+            );
+          } catch {
+            // Non-fatal: still serve the fetched binary
+          }
+        }
+        sendBinary(fetched.buf, fetched.mime);
+        return;
+      }
+    }
+
+    // Tier 5: Bundled RYZITE branding logo fallback (ships inside /public/assets/branding/)
+    const lowerName = String(row.original_name || row.file_name || '').toLowerCase();
+    if (
+      lowerName === 'ryzite-logo.png' ||
+      lowerName === 'ryzite-footer-logo.png' ||
+      lowerName === 'original logo.png'
+    ) {
+      const bundledPaths = [
+        path.resolve(process.cwd(), 'public', 'assets', 'branding', 'ryzite-logo.png'),
+        path.resolve(process.cwd(), 'dist', 'assets', 'branding', 'ryzite-logo.png'),
+      ];
+      for (const candidate of bundledPaths) {
+        if (fs.existsSync(candidate)) {
+          const buf = fs.readFileSync(candidate);
+          sendBinary(buf, 'image/png', 'public, max-age=86400');
+          return;
+        }
+      }
+    }
+
+    res.status(404).json({
+      error:
+        'Image binary could not be retrieved from the upstream source. Configure GITHUB_TOKEN or MAIN_SITE_URL in Vercel environment variables, or use "Replace File" in Media Library to upload this asset directly.',
+    });
   });
 
   app.get('/api/media', requireAuth, async (_req, res) => {

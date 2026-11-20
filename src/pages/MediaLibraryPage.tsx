@@ -6,9 +6,7 @@ import {
   Copy,
   Edit3,
   ExternalLink,
-  FileText,
   FolderOpen,
-  ImageOff,
   Link2,
   Search,
   Upload,
@@ -16,6 +14,7 @@ import {
 import { apiFetch, apiUpload } from '../lib/api';
 import type { MediaAsset } from '../types/cms';
 import { MediaEditorModal } from '../components/media/MediaEditorModal';
+import { MediaThumbnail } from '../components/media/MediaThumbnail';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -38,7 +37,6 @@ export function MediaLibraryPage() {
   const [selectedAsset, setSelectedAsset] = useState<MediaAsset | null>(null);
   const [highlightField, setHighlightField] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [brokenIds, setBrokenIds] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -322,7 +320,6 @@ export function MediaLibraryPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {filtered.map((item) => {
             const isImg = item.mimeType.startsWith('image/');
-            const isBroken = brokenIds[item.id];
             const missingAlt = isImg && !item.altText.trim();
 
             return (
@@ -336,34 +333,17 @@ export function MediaLibraryPage() {
                     setSelectedAsset(item);
                     setHighlightField(null);
                   }}
-                  className="h-44 bg-[#F4F7FC] relative flex items-center justify-center overflow-hidden cursor-pointer group"
+                  className="h-44 bg-[#F4F7FC] relative overflow-hidden cursor-pointer group"
                 >
-                  {isImg && !isBroken ? (
-                    <img
-                      src={item.url}
-                      alt={item.altText || item.originalName}
-                      className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform"
-                      style={{
-                        objectPosition: `${item.focalPoint?.x ?? 50}% ${item.focalPoint?.y ?? 50}%`,
-                      }}
-                      onError={() =>
-                        setBrokenIds((prev) => ({ ...prev, [item.id]: true }))
-                      }
-                    />
-                  ) : isImg && isBroken ? (
-                    <div className="p-3 text-center text-red-600">
-                      <ImageOff className="w-7 h-7 mx-auto mb-1" />
-                      <p className="text-[11px] font-semibold">Image unavailable</p>
-                      <p className="text-[10px] text-[#64748B]">Click to replace file</p>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center gap-1.5 text-[#1438B8]">
-                      <FileText className="w-10 h-10" />
-                      <span className="text-[11px] font-semibold uppercase tracking-wide">
-                        PDF Document
-                      </span>
-                    </div>
-                  )}
+                  <MediaThumbnail
+                    src={item.url}
+                    alt={item.altText || item.originalName}
+                    isPdf={!isImg}
+                    className="w-full h-full"
+                    imgClassName="w-full h-full object-cover group-hover:scale-[1.02] transition-transform"
+                    objectPosition={`${item.focalPoint?.x ?? 50}% ${item.focalPoint?.y ?? 50}%`}
+                    showErrorHint
+                  />
 
                   {/* Top badges */}
                   <div className="absolute top-2 left-2 flex items-center gap-1">

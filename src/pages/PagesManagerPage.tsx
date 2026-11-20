@@ -22,6 +22,7 @@ import {
   Search,
   Send,
   Trash2,
+  X,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import type {
@@ -34,7 +35,7 @@ import type {
 } from '../types/cms';
 import { SeoFieldsPanel } from '../components/ui/SeoFieldsPanel';
 import { MediaPickerModal } from '../components/media/MediaPickerModal';
-import { PageBlockRenderer } from '../components/public/PageBlockRenderer';
+import { VisualPagePreview } from '../components/cms/VisualPagePreview';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 const BLOCK_CATALOG: { type: PageBlockType; label: string; desc: string }[] = [
@@ -175,6 +176,7 @@ export function PagesManagerPage() {
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [pickerTarget, setPickerTarget] = useState<{ blockId: string; cardIdx?: number } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<WebsitePage | null>(null);
+  const [previewModalPage, setPreviewModalPage] = useState<WebsitePage | null>(null);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const loadPagesAndSeo = async () => {
@@ -1244,21 +1246,9 @@ export function PagesManagerPage() {
           </div>
         )}
 
-        {/* TAB 3: LIVE PREVIEW */}
+        {/* TAB 3: VISUAL LIVE PREVIEW */}
         {tab === 'preview' && (
-          <div className="bg-[#F4F7FC] rounded-2xl border border-[#DDE5F0] p-6 sm:p-10">
-            <div className="max-w-5xl mx-auto">
-              <div className="mb-6 flex items-center justify-between text-xs text-[#64748B] border-b border-[#DDE5F0] pb-3">
-                <span>
-                  Live Preview of <strong>{editing.title}</strong> ({editing.slug})
-                </span>
-                <span className="font-semibold text-[#1438B8]">
-                  {dirty ? 'Showing unsaved draft preview' : 'Matches saved state'}
-                </span>
-              </div>
-              <PageBlockRenderer blocks={editing.blocks} />
-            </div>
-          </div>
+          <VisualPagePreview page={editing} initialMode="draft" />
         )}
 
         {/* TAB 4: REVISION HISTORY */}
@@ -1498,6 +1488,14 @@ export function PagesManagerPage() {
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
+                            onClick={() => setPreviewModalPage(p)}
+                            title="Open Visual Website Preview"
+                            className="inline-flex items-center gap-1 rounded-lg border border-[#D4DFEE] bg-white hover:border-[#1438B8] hover:text-[#1438B8] px-2.5 py-1.5 text-xs font-semibold text-[#334155] transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" /> Preview
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => openEditor(p, 'content')}
                             className="inline-flex items-center gap-1 rounded-lg bg-[#EEF3FC] hover:bg-[#1438B8] text-[#1438B8] hover:text-white px-3 py-1.5 text-xs font-semibold transition-colors"
                           >
@@ -1508,7 +1506,7 @@ export function PagesManagerPage() {
                               href={p.slug === '/' ? '/' : p.slug}
                               target="_blank"
                               rel="noreferrer"
-                              title="View live page"
+                              title="Open live public page in new tab"
                               className="p-1.5 rounded-lg border border-[#DDE5F0] hover:bg-[#F4F7FC] text-[#475569]"
                             >
                               <ExternalLink className="w-3.5 h-3.5" />
@@ -1532,6 +1530,52 @@ export function PagesManagerPage() {
           </div>
         )}
       </div>
+
+      {/* Full Visual Page Preview Modal */}
+      {previewModalPage && (
+        <div className="fixed inset-0 z-50 bg-[#0D1F4E]/60 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-5">
+          <div className="w-full max-w-6xl max-h-[94vh] bg-[#F8FAFD] rounded-2xl border border-[#DDE5F0] shadow-2xl flex flex-col overflow-hidden">
+            <div className="px-5 py-3.5 bg-white border-b border-[#E5ECF6] flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-[#0F172A] truncate">
+                  Visual Website Preview — {previewModalPage.title}
+                </h2>
+                <p className="text-[11px] font-mono text-[#64748B] truncate">
+                  {previewModalPage.slug}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = previewModalPage;
+                    setPreviewModalPage(null);
+                    openEditor(target, 'content');
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#1438B8] hover:bg-[#0D1F4E] text-white px-3 py-1.5 text-xs font-semibold"
+                >
+                  <Edit3 className="w-3.5 h-3.5" /> Edit Page
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModalPage(null)}
+                  className="p-1.5 rounded-lg text-[#64748B] hover:bg-[#F4F7FC] hover:text-[#0F172A]"
+                  aria-label="Close visual preview"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <VisualPagePreview
+                page={previewModalPage}
+                initialMode={previewModalPage.status === 'published' ? 'published' : 'draft'}
+                heightClassName="h-[74vh] min-h-[500px]"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}

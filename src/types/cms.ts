@@ -214,7 +214,7 @@ export interface MediaAsset {
   height?: number | null;
   sha256?: string | null;
   version?: number;
-  source: 'sanity' | 'local' | 'database';
+  source: 'sanity' | 'local' | 'database' | 'main-site';
   uploadedBy: string;
   uploadedAt: string;
   updatedAt?: string | null;

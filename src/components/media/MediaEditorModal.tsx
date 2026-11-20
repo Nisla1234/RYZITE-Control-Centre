@@ -9,6 +9,7 @@ import {
   FileText,
   ImageOff,
   Link2,
+  Loader2,
   RefreshCw,
   Save,
   Trash2,
@@ -49,6 +50,8 @@ export function MediaEditorModal({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [copied, setCopied] = useState(false);
   const [broken, setBroken] = useState(false);
+  const [imgLoading, setImgLoading] = useState(true);
+  const [retryCount, setRetryCount] = useState(0);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const replaceRef = useRef<HTMLInputElement | null>(null);
   const altRef = useRef<HTMLInputElement | null>(null);
@@ -64,6 +67,8 @@ export function MediaEditorModal({
     setFocalPoint(asset.focalPoint || { x: 50, y: 50 });
     setConfirmDelete(false);
     setBroken(false);
+    setImgLoading(true);
+    setRetryCount(0);
     setNotice(null);
     setTab('details');
 
@@ -264,8 +269,19 @@ export function MediaEditorModal({
             >
               {isImage && !broken ? (
                 <>
+                  {imgLoading && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-[#F8FAFD] text-[#64748B] z-10">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#1438B8]" />
+                      <span className="text-[11px] font-medium">Loading image…</span>
+                    </div>
+                  )}
                   <img
-                    src={asset.url}
+                    key={`${asset.url}-${retryCount}`}
+                    src={
+                      retryCount > 0
+                        ? `${asset.url}${asset.url.includes('?') ? '&' : '?'}retry=${retryCount}`
+                        : asset.url
+                    }
                     alt={altText || asset.originalName}
                     className={
                       previewMode === 'optimized'
@@ -277,7 +293,11 @@ export function MediaEditorModal({
                         ? { objectPosition: `${focalPoint.x}% ${focalPoint.y}%` }
                         : undefined
                     }
-                    onError={() => setBroken(true)}
+                    onLoad={() => setImgLoading(false)}
+                    onError={() => {
+                      setImgLoading(false);
+                      setBroken(true);
+                    }}
                   />
                   <div
                     className="pointer-events-none absolute w-5 h-5 -ml-2.5 -mt-2.5 rounded-full border-2 border-white bg-[#1438B8]/80 shadow flex items-center justify-center"
@@ -287,12 +307,24 @@ export function MediaEditorModal({
                   </div>
                 </>
               ) : isImage && broken ? (
-                <div className="p-4 text-center">
-                  <ImageOff className="w-8 h-8 text-red-500 mx-auto mb-2" />
+                <div className="p-4 text-center space-y-2">
+                  <ImageOff className="w-8 h-8 text-red-500 mx-auto" />
                   <p className="text-xs font-semibold text-red-700">Image failed to load</p>
-                  <p className="text-[11px] text-[#64748B] mt-1">
-                    Use <strong>Replace File</strong> below to upload a fresh copy without breaking page references.
+                  <p className="text-[11px] text-[#64748B] max-w-xs mx-auto">
+                    If this is an imported private-repository asset, configure <code className="font-mono">GITHUB_TOKEN</code> in Vercel or click <strong>Replace File</strong> below to upload it directly.
                   </p>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setBroken(false);
+                      setImgLoading(true);
+                      setRetryCount((c) => c + 1);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#CBD5E1] bg-white hover:bg-[#F1F5F9] px-3 py-1 text-xs font-medium text-[#334155]"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Retry Load
+                  </button>
                 </div>
               ) : isPdf ? (
                 <iframe

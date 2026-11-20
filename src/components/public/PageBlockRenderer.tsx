@@ -8,6 +8,7 @@ import {
   Phone,
 } from 'lucide-react';
 import type { PageBlock } from '../../types/cms';
+import { MediaThumbnail } from '../media/MediaThumbnail';
 
 function renderInlineMarkdown(text: string): React.ReactNode[] {
   if (!text) return [];
@@ -157,10 +158,11 @@ export function PageBlockRenderer({
                 </div>
                 {block.imageUrl && (
                   <div className="lg:col-span-5">
-                    <img
+                    <MediaThumbnail
                       src={block.imageUrl}
                       alt={block.imageAlt || block.text || 'Hero visual'}
-                      className="w-full h-64 sm:h-72 object-cover rounded-xl border border-white/15 shadow-xl"
+                      className="w-full h-64 sm:h-72 rounded-xl border border-white/15 shadow-xl"
+                      compact
                     />
                   </div>
                 )}
@@ -213,10 +215,10 @@ export function PageBlockRenderer({
           return (
             <figure key={block.id} className="space-y-2">
               <div className="rounded-2xl overflow-hidden border border-[#DDE5F0] bg-[#F8FAFD]">
-                <img
+                <MediaThumbnail
                   src={block.imageUrl}
                   alt={block.imageAlt || ''}
-                  className="w-full max-h-[460px] object-cover"
+                  className="w-full h-72 sm:h-96"
                 />
               </div>
               {block.caption && (
@@ -266,10 +268,11 @@ export function PageBlockRenderer({
                     className="rounded-xl border border-[#DDE5F0] bg-white overflow-hidden flex flex-col hover:border-[#1438B8]/40 hover:shadow-md transition-all"
                   >
                     {card.imageUrl && (
-                      <img
+                      <MediaThumbnail
                         src={card.imageUrl}
                         alt={card.title}
-                        className="w-full h-40 object-cover"
+                        className="w-full h-40"
+                        compact
                       />
                     )}
                     <div className="p-5 flex-1 flex flex-col justify-between gap-3">
