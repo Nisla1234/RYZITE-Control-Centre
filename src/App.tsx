@@ -18,6 +18,7 @@ import { SeoCenterPage } from './pages/SeoCenterPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { ActivityLogsPage } from './pages/ActivityLogsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { PageSpeedPage } from './pages/PageSpeedPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -160,6 +161,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <SettingsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/pagespeed/*"
+            element={
+              <ProtectedRoute>
+                <PageSpeedPage />
               </ProtectedRoute>
             }
           />

@@ -308,6 +308,31 @@ export async function initDatabase(): Promise<void> {
         created_by TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS pagespeed_reports (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        page_slug TEXT NOT NULL,
+        page_title TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        performance_score INTEGER,
+        accessibility_score INTEGER,
+        best_practices_score INTEGER,
+        seo_score INTEGER,
+        fcp TEXT,
+        lcp TEXT,
+        tbt TEXT,
+        cls TEXT,
+        speed_index TEXT,
+        core_web_vitals_status TEXT,
+        opportunities_json TEXT,
+        diagnostics_json TEXT,
+        recommendations_json TEXT,
+        status TEXT NOT NULL DEFAULT 'not_tested',
+        tested_at TEXT,
+        error_message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pagespeed_page ON pagespeed_reports(page_id, strategy);
+
       CREATE INDEX IF NOT EXISTS idx_cms_revisions_doc ON cms_revisions(doc_type, doc_id, created_at);
     `);
     await pool.query(`
@@ -443,6 +468,31 @@ export async function initDatabase(): Promise<void> {
         created_at TEXT NOT NULL,
         created_by TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS pagespeed_reports (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        page_slug TEXT NOT NULL,
+        page_title TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        performance_score INTEGER,
+        accessibility_score INTEGER,
+        best_practices_score INTEGER,
+        seo_score INTEGER,
+        fcp TEXT,
+        lcp TEXT,
+        tbt TEXT,
+        cls TEXT,
+        speed_index TEXT,
+        core_web_vitals_status TEXT,
+        opportunities_json TEXT,
+        diagnostics_json TEXT,
+        recommendations_json TEXT,
+        status TEXT NOT NULL DEFAULT 'not_tested',
+        tested_at TEXT,
+        error_message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pagespeed_page ON pagespeed_reports(page_id, strategy);
 
       CREATE INDEX IF NOT EXISTS idx_cms_revisions_doc ON cms_revisions(doc_type, doc_id, created_at);
     `);

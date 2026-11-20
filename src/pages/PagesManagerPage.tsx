@@ -36,6 +36,7 @@ import type {
 import { SeoFieldsPanel } from '../components/ui/SeoFieldsPanel';
 import { MediaPickerModal } from '../components/media/MediaPickerModal';
 import { VisualPagePreview } from '../components/cms/VisualPagePreview';
+import { PageSpeedSummaryWidget } from '../components/cms/PageSpeedSummaryWidget';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 
 const BLOCK_CATALOG: { type: PageBlockType; label: string; desc: string }[] = [
@@ -524,6 +525,13 @@ export function PagesManagerPage() {
             </button>
           </div>
         )}
+
+        {/* PageSpeed Insights Summary Widget at the Very Top of Page Editor */}
+        <PageSpeedSummaryWidget
+          pageId={editing.id}
+          pageSlug={editing.slug}
+          pageTitle={editing.title}
+        />
 
         {/* Page Identity Row */}
         <div className="bg-white rounded-xl border border-[#DDE5F0] p-4 grid grid-cols-1 md:grid-cols-2 gap-4">

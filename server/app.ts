@@ -2796,5 +2796,143 @@ export function createApiApp(): express.Express {
     });
   });
 
+  // ============================================================
+  // GOOGLE PAGESPEED INSIGHTS ENDPOINTS
+  // ============================================================
+
+  app.get('/api/pagespeed/reports', requireAuth, async (_req, res) => {
+    const rows = await dbAll<any>('SELECT * FROM pagespeed_reports ORDER BY tested_at DESC');
+    res.json({ reports: rows });
+  });
+
+  app.get('/api/pagespeed/page/:pageId', requireAuth, async (req, res) => {
+    const { pageId } = req.params;
+    const rows = await dbAll<any>('SELECT * FROM pagespeed_reports WHERE page_id = $1', [pageId]);
+    res.json({ reports: rows });
+  });
+
+  app.post('/api/pagespeed/run', requireAuth, async (req: AuthenticatedRequest, res) => {
+    const pageId = sanitizeString(req.body?.pageId, 100);
+    const strategyInput = sanitizeString(req.body?.strategy, 20) || 'both'; // desktop, mobile, both
+    const apiKey = (process.env.PAGESPEED_API_KEY || '').trim();
+
+    const pages = await listDocuments<WebsitePage>('page');
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage) {
+      res.status(404).json({ error: 'Page not found for PageSpeed testing.' });
+      return;
+    }
+
+    const mainSite = (process.env.MAIN_SITE_URL || process.env.SITE_URL || 'https://ryzite-website.thulirkalcom.workers.dev').trim().replace(/\/$/, '');
+    const slug = (targetPage.slug || '/').startsWith('/') ? targetPage.slug : `/${targetPage.slug}`;
+    const targetUrl = `${mainSite}${slug === '/' ? '/' : slug}`;
+
+    const strategies = strategyInput === 'both' ? ['desktop', 'mobile'] : [strategyInput === 'desktop' ? 'desktop' : 'mobile'];
+    const results: any[] = [];
+    const now = new Date().toISOString();
+
+    for (const strat of strategies) {
+      const reportId = `${targetPage.id}-${strat}`;
+      await dbRun(
+        `INSERT INTO pagespeed_reports (id, page_id, page_slug, page_title, strategy, status, tested_at)
+         VALUES ($1, $2, $3, $4, $5, 'testing', $6)
+         ON CONFLICT(id) DO UPDATE SET status = 'testing', tested_at = EXCLUDED.tested_at`,
+        [reportId, targetPage.id, slug, targetPage.title, strat, now]
+      );
+
+      if (!apiKey) {
+        const errMsg = 'PageSpeed API key (PAGESPEED_API_KEY) is not configured in environment variables.';
+        await dbRun(
+          `UPDATE pagespeed_reports SET status = 'failed', error_message = $1, tested_at = $2 WHERE id = $3`,
+          [errMsg, new Date().toISOString(), reportId]
+        );
+        const row = await dbGet<any>('SELECT * FROM pagespeed_reports WHERE id = $1', [reportId]);
+        results.push(row);
+        continue;
+      }
+
+      try {
+        const psiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(targetUrl)}&strategy=${strat}&key=${encodeURIComponent(apiKey)}`;
+        const psiRes = await fetch(psiUrl, { signal: AbortSignal.timeout(25000) });
+        if (!psiRes.ok) {
+          const errData = await psiRes.json().catch(() => ({}));
+          throw new Error((errData as any)?.error?.message || `PageSpeed API error (HTTP ${psiRes.status})`);
+        }
+        const data: any = await psiRes.json();
+        const lh = data.lighthouseResult || {};
+        const categories = lh.categories || {};
+
+        const perfScore = categories.performance?.score != null ? Math.round(categories.performance.score * 100) : null;
+        const a11yScore = categories.accessibility?.score != null ? Math.round(categories.accessibility.score * 100) : null;
+        const bpScore = categories['best-practices']?.score != null ? Math.round(categories['best-practices'].score * 100) : null;
+        const seoScore = categories.seo?.score != null ? Math.round(categories.seo.score * 100) : null;
+
+        const audits = lh.audits || {};
+        const fcp = audits['first-contentful-paint']?.displayValue || null;
+        const lcp = audits['largest-contentful-paint']?.displayValue || null;
+        const tbt = audits['total-blocking-time']?.displayValue || null;
+        const cls = audits['cumulative-layout-shift']?.displayValue || null;
+        const speedIndex = audits['speed-index']?.displayValue || null;
+
+        const cwvPass = (perfScore ?? 0) >= 75 && (lcp ? parseFloat(lcp) <= 2.5 : true);
+        const cwvStatus = cwvPass ? 'Passed' : 'Needs Improvement';
+
+        const opportunities: any[] = [];
+        const diagnostics: any[] = [];
+        const recommendations: string[] = [];
+
+        for (const [_, auditObj] of Object.entries(audits) as [string, any][]) {
+          if (auditObj?.details?.type === 'opportunity' && auditObj.score < 0.9) {
+            opportunities.push({ title: auditObj.title, savings: auditObj.details.overallSavingsMs || 0, description: auditObj.description });
+            recommendations.push(auditObj.title);
+          }
+          if (auditObj?.score !== null && auditObj.score < 0.7 && !auditObj?.details?.type) {
+            diagnostics.push({ title: auditObj.title, description: auditObj.description });
+          }
+        }
+
+        const testedAt = new Date().toISOString();
+        await dbRun(
+          `UPDATE pagespeed_reports
+           SET performance_score = $1, accessibility_score = $2, best_practices_score = $3, seo_score = $4,
+               fcp = $5, lcp = $6, tbt = $7, cls = $8, speed_index = $9, core_web_vitals_status = $10,
+               opportunities_json = $11, diagnostics_json = $12, recommendations_json = $13,
+               status = 'completed', tested_at = $14, error_message = NULL
+           WHERE id = $15`,
+          [
+            perfScore,
+            a11yScore,
+            bpScore,
+            seoScore,
+            fcp,
+            lcp,
+            tbt,
+            cls,
+            speedIndex,
+            cwvStatus,
+            JSON.stringify(opportunities.slice(0, 5)),
+            JSON.stringify(diagnostics.slice(0, 5)),
+            JSON.stringify(recommendations.slice(0, 6)),
+            testedAt,
+            reportId,
+          ]
+        );
+
+        const updatedRow = await dbGet<any>('SELECT * FROM pagespeed_reports WHERE id = $1', [reportId]);
+        results.push(updatedRow);
+      } catch (err: any) {
+        const errMsg = err.message || 'PageSpeed test failed.';
+        await dbRun(
+          `UPDATE pagespeed_reports SET status = 'failed', error_message = $1, tested_at = $2 WHERE id = $3`,
+          [errMsg, new Date().toISOString(), reportId]
+        );
+        const row = await dbGet<any>('SELECT * FROM pagespeed_reports WHERE id = $1', [reportId]);
+        results.push(row);
+      }
+    }
+
+    res.json({ results });
+  });
+
   return app;
 }

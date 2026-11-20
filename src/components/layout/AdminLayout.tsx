@@ -22,6 +22,7 @@ import {
   AlertCircle,
   Info,
   ExternalLink,
+  Gauge,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { AdminAvatar } from '../ui/AdminAvatar';
@@ -48,6 +49,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Media Library', to: '/admin/media/', icon: ImageIcon, group: 'content', badgeKey: 'media' },
   { label: 'SEO Centre', to: '/admin/seo/', icon: SearchCheck, group: 'growth', badgeKey: 'total' },
   { label: 'Analytics (GA4)', to: '/admin/analytics/', icon: BarChart3, group: 'growth' },
+  { label: 'PageSpeed Insights', to: '/admin/pagespeed/', icon: Gauge, group: 'growth' },
   { label: 'Activity Logs', to: '/admin/activity/', icon: History, group: 'system' },
   { label: 'Settings', to: '/admin/settings/', icon: Settings, group: 'system' },
 ];
