@@ -6,17 +6,22 @@ export const SANITY_PROJECT_ID = process.env.SANITY_PROJECT_ID || 'hnm8jy5w';
 export const SANITY_DATASET = process.env.SANITY_DATASET || 'staging';
 export const SANITY_API_VERSION = process.env.SANITY_API_VERSION || '2024-01-01';
 
+export function getSanityToken(): string {
+  return (process.env.SANITY_API_TOKEN || process.env.SANITY_API_WRITE_TOKEN || '').trim();
+}
+
 export function hasSanityWriteToken(): boolean {
-  return Boolean(process.env.SANITY_API_TOKEN && process.env.SANITY_API_TOKEN.trim().length > 10);
+  return getSanityToken().length > 10;
 }
 
 export function getSanityClient(datasetOverride?: string): SanityClient {
+  const token = getSanityToken();
   return createClient({
     projectId: SANITY_PROJECT_ID,
     dataset: datasetOverride || SANITY_DATASET,
     apiVersion: SANITY_API_VERSION,
     useCdn: false,
-    token: process.env.SANITY_API_TOKEN || undefined,
+    token: token || undefined,
   });
 }
 

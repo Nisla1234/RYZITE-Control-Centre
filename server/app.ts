@@ -1219,8 +1219,8 @@ export function createApiApp(): express.Express {
       email,
       environment: {
         nodeEnv: process.env.NODE_ENV || 'development',
-        siteUrl: process.env.SITE_URL || 'https://ryzite.com',
-        appUrl: process.env.APP_URL || process.env.URL || 'http://localhost:3000',
+        siteUrl: process.env.MAIN_SITE_URL || process.env.SITE_URL || 'https://ryzite.lk',
+        appUrl: process.env.CMS_PUBLIC_URL || process.env.APP_URL || process.env.URL || 'http://localhost:3000',
         sessionTtlHours,
       },
     });
@@ -1341,9 +1341,155 @@ export function createApiApp(): express.Express {
 
   // ============================================================
   // PUBLIC READ-ONLY WEBSITE ENDPOINTS (PUBLISHED CONTENT ONLY)
+  // & SIGNED DRAFT PREVIEW ENDPOINT FOR MAIN ASTRO WEBSITE
   // ============================================================
 
-  app.get('/api/public/site', async (_req, res) => {
+  const getMainSiteBaseUrl = (): string =>
+    (process.env.MAIN_SITE_URL || process.env.SITE_URL || 'https://ryzite.lk')
+      .trim()
+      .replace(/\/$/, '');
+
+  const getCmsPublicOrigin = (req: express.Request): string => {
+    const configured = (process.env.CMS_PUBLIC_URL || process.env.APP_URL || '').trim().replace(/\/$/, '');
+    if (configured && !configured.includes('localhost')) return configured;
+    const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'https';
+    const host = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.get('host') || '';
+    return host ? `${proto}://${host}` : configured;
+  };
+
+  const rawGithubUrlToMediaId = new Map<string, string>(
+    mainSiteSeed.media.map(([id, , , , url]) => [url, id])
+  );
+
+  const rewriteRelativeMediaUrls = <T,>(value: T, origin: string): T => {
+    if (!origin) return value;
+    if (typeof value === 'string') {
+      if (value.startsWith('/api/media/') || value.startsWith('/assets/')) {
+        return `${origin}${value}` as unknown as T;
+      }
+      const mappedMediaId = rawGithubUrlToMediaId.get(value);
+      if (mappedMediaId) {
+        return `${origin}/api/media/${mappedMediaId}/file?v=1` as unknown as T;
+      }
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => rewriteRelativeMediaUrls(item, origin)) as unknown as T;
+    }
+    if (value && typeof value === 'object') {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(value as Record<string, any>)) {
+        out[k] = rewriteRelativeMediaUrls(v, origin);
+      }
+      return out as T;
+    }
+    return value;
+  };
+
+  const setPublicApiCors = (req: express.Request, res: express.Response) => {
+    const origin = req.headers.origin;
+    const mainSite = getMainSiteBaseUrl();
+    const allowed = [
+      mainSite,
+      'https://ryzite.lk',
+      'https://www.ryzite.lk',
+      'http://localhost:4321',
+      'http://localhost:3000',
+    ];
+    if (
+      origin &&
+      (allowed.includes(origin) || /^https:\/\/ryzite-[a-z0-9-]+\.vercel\.app$/i.test(origin))
+    ) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CMS-Preview-Token');
+  };
+
+  const getPreviewSigningSecret = (): string =>
+    (process.env.PREVIEW_TOKEN_SECRET || process.env.SESSION_SECRET || 'ryzite-dev-preview-secret').trim();
+
+  const normalizePageSlug = (raw: string): string => {
+    const trimmed = (raw || '/').trim();
+    const withLead = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+    return withLead.length > 1 ? withLead.replace(/\/+$/, '') : '/';
+  };
+
+  const signPreviewToken = (slug: string, adminUsername: string, ttlSeconds = 900) => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const payload = {
+      slug: normalizePageSlug(slug),
+      sub: adminUsername,
+      iat: nowSec,
+      exp: nowSec + ttlSeconds,
+    };
+    const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const sig = crypto
+      .createHmac('sha256', getPreviewSigningSecret())
+      .update(encoded)
+      .digest('base64url');
+    return {
+      token: `${encoded}.${sig}`,
+      expiresAt: new Date(payload.exp * 1000).toISOString(),
+    };
+  };
+
+  const verifyPreviewToken = (
+    token: string
+  ): { slug: string; sub: string; iat: number; exp: number } | null => {
+    if (!token || !token.includes('.')) return null;
+    const [encoded, sig] = token.split('.');
+    if (!encoded || !sig) return null;
+    const expected = crypto
+      .createHmac('sha256', getPreviewSigningSecret())
+      .update(encoded)
+      .digest('base64url');
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+      if (!parsed || typeof parsed.exp !== 'number' || parsed.exp * 1000 <= Date.now()) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const notifyMainSiteRevalidate = (event: string, payload: Record<string, any>) => {
+    const revalidateUrl = (process.env.MAIN_SITE_REVALIDATE_URL || '').trim();
+    const deployHook = (process.env.VERCEL_MAIN_SITE_DEPLOY_HOOK || '').trim();
+    const webhookSecret = (process.env.CMS_WEBHOOK_SECRET || '').trim();
+
+    if (revalidateUrl) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (webhookSecret) headers['X-CMS-Webhook-Secret'] = webhookSecret;
+      fetch(revalidateUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ event, ...payload, timestamp: new Date().toISOString() }),
+      }).catch(() => {});
+    }
+
+    if (deployHook) {
+      fetch(deployHook, { method: 'POST' }).catch(() => {});
+    }
+  };
+
+  app.options('/api/public/*', (req, res) => {
+    setPublicApiCors(req, res);
+    res.status(204).end();
+  });
+
+  app.get('/api/public/site', async (req, res) => {
+    setPublicApiCors(req, res);
     const settingsRow = await dbGet<{ value_json: string }>(
       'SELECT value_json FROM site_settings WHERE key = $1',
       ['global_seo']
@@ -1363,8 +1509,8 @@ export function createApiApp(): express.Express {
         listPublishedDocuments<any>('article'),
       ]);
 
-    res.setHeader('Cache-Control', 'no-store');
-    res.json({
+    const origin = req.query.absoluteMedia === '0' ? '' : getCmsPublicOrigin(req);
+    const payload = {
       globalSeo,
       pages,
       services: services.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
@@ -1373,18 +1519,28 @@ export function createApiApp(): express.Express {
       team: team.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
       testimonials: testimonials.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)),
       articles,
-    });
+      cmsOrigin: origin || undefined,
+      generatedAt: new Date().toISOString(),
+    };
+
+    res.setHeader(
+      'Cache-Control',
+      req.query.fresh === '1'
+        ? 'no-store'
+        : 'public, s-maxage=30, stale-while-revalidate=120'
+    );
+    res.json(origin ? rewriteRelativeMediaUrls(payload, origin) : payload);
   });
 
   app.get('/api/public/page', async (req, res) => {
+    setPublicApiCors(req, res);
     const rawSlug = sanitizeString(req.query.slug, 200) || '/';
-    const normalizedSlug = rawSlug.startsWith('/') ? rawSlug : `/${rawSlug}`;
+    const normalizedSlug = normalizePageSlug(rawSlug);
 
     const pages = await listPublishedDocuments<WebsitePage>('page');
-    const page = pages.find((p) => {
-      const pSlug = (p.slug || '/').startsWith('/') ? p.slug : `/${p.slug}`;
-      return pSlug.toLowerCase() === normalizedSlug.toLowerCase();
-    });
+    const page = pages.find(
+      (p) => normalizePageSlug(p.slug || '/').toLowerCase() === normalizedSlug.toLowerCase()
+    );
 
     if (!page) {
       res.status(404).json({ error: 'Published page not found.' });
@@ -1404,7 +1560,7 @@ export function createApiApp(): express.Express {
       description: page.seo?.metaDescription || globalSeo?.siteDescription || '',
       canonicalUrl:
         page.seo?.canonicalUrl ||
-        `${(globalSeo?.siteUrl || 'https://ryzite.lk').replace(/\/$/, '')}${normalizedSlug === '/' ? '/' : normalizedSlug}`,
+        `${(globalSeo?.siteUrl || getMainSiteBaseUrl()).replace(/\/$/, '')}${normalizedSlug === '/' ? '/' : normalizedSlug}`,
       ogTitle: page.seo?.ogTitle || page.seo?.metaTitle || globalSeo?.siteTitle || page.title,
       ogDescription:
         page.seo?.ogDescription || page.seo?.metaDescription || globalSeo?.siteDescription || '',
@@ -1412,8 +1568,115 @@ export function createApiApp(): express.Express {
       noIndex: Boolean(page.seo?.noIndex),
     };
 
+    const origin = req.query.absoluteMedia === '0' ? '' : getCmsPublicOrigin(req);
+    const payload = { page, seo: resolvedSeo, globalSeo };
+
+    res.setHeader(
+      'Cache-Control',
+      req.query.fresh === '1'
+        ? 'no-store'
+        : 'public, s-maxage=30, stale-while-revalidate=120'
+    );
+    res.json(origin ? rewriteRelativeMediaUrls(payload, origin) : payload);
+  });
+
+  // Admin-only: issue a short-lived (15-minute) signed draft preview token for the real Astro main website
+  app.post('/api/preview/token', requireAuth, async (req: AuthenticatedRequest, res) => {
+    const rawSlug = sanitizeString(req.body?.slug, 200) || '/';
+    const normalized = normalizePageSlug(rawSlug);
+    const { token, expiresAt } = signPreviewToken(normalized, req.adminUser!.username, 900);
+    const mainSiteUrl = getMainSiteBaseUrl();
+    const pathPart = normalized === '/' ? '/' : normalized;
+    const liveUrl = `${mainSiteUrl}${pathPart}`;
+    const previewUrl = `${liveUrl}?cmsPreview=1&previewToken=${encodeURIComponent(token)}`;
+
+    res.json({
+      token,
+      expiresAt,
+      slug: normalized,
+      mainSiteUrl,
+      liveUrl,
+      previewUrl,
+    });
+  });
+
+  // Token-protected draft preview API consumed server-side by the real Astro main website
+  app.get('/api/public/preview', async (req, res) => {
+    setPublicApiCors(req, res);
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ page, seo: resolvedSeo, globalSeo });
+
+    const token =
+      sanitizeString(req.query.token, 1024) ||
+      sanitizeString(req.headers['x-cms-preview-token'], 1024);
+
+    const verified = verifyPreviewToken(token);
+    if (!verified) {
+      res.status(401).json({
+        error: 'Invalid or expired draft preview token. Generate a fresh preview from Admin CMS.',
+      });
+      return;
+    }
+
+    const requestedSlug = normalizePageSlug(
+      sanitizeString(req.query.slug, 200) || verified.slug || '/'
+    );
+
+    const [allPages, services, solutions, portfolio, team, testimonials, articles, settingsRow] =
+      await Promise.all([
+        listDocuments<WebsitePage>('page'),
+        listDocuments<any>('service'),
+        listDocuments<any>('solution'),
+        listDocuments<any>('project'),
+        listDocuments<any>('team'),
+        listDocuments<any>('testimonial'),
+        listDocuments<any>('article'),
+        dbGet<{ value_json: string }>('SELECT value_json FROM site_settings WHERE key = $1', [
+          'global_seo',
+        ]),
+      ]);
+
+    const page =
+      allPages.find(
+        (p) => normalizePageSlug(p.slug || '/').toLowerCase() === requestedSlug.toLowerCase()
+      ) || null;
+
+    const globalSeo: GlobalSeoSettings | null = settingsRow
+      ? JSON.parse(settingsRow.value_json)
+      : null;
+
+    const resolvedSeo = page
+      ? {
+          title: page.seo?.metaTitle || globalSeo?.siteTitle || page.title,
+          description: page.seo?.metaDescription || globalSeo?.siteDescription || '',
+          canonicalUrl:
+            page.seo?.canonicalUrl ||
+            `${(globalSeo?.siteUrl || getMainSiteBaseUrl()).replace(/\/$/, '')}${requestedSlug === '/' ? '/' : requestedSlug}`,
+          ogTitle: page.seo?.ogTitle || page.seo?.metaTitle || globalSeo?.siteTitle || page.title,
+          ogDescription:
+            page.seo?.ogDescription || page.seo?.metaDescription || globalSeo?.siteDescription || '',
+          ogImage: page.seo?.ogImage || globalSeo?.defaultOgImage || '/assets/branding/ryzite-logo.png',
+          noIndex: true,
+        }
+      : null;
+
+    const origin = req.query.absoluteMedia === '0' ? '' : getCmsPublicOrigin(req);
+    const payload = {
+      mode: 'draft',
+      previewAuthorizedBy: verified.sub,
+      expiresAt: new Date(verified.exp * 1000).toISOString(),
+      page,
+      seo: resolvedSeo,
+      globalSeo,
+      pages: allPages,
+      services,
+      solutions,
+      portfolio,
+      team,
+      testimonials,
+      articles,
+    };
+
+    res.json(origin ? rewriteRelativeMediaUrls(payload, origin) : payload);
   });
 
   // ============================================================
@@ -1739,6 +2002,14 @@ export function createApiApp(): express.Express {
       ipAddress: getClientIp(req),
     });
 
+    if (nextStatus === 'published' || unpublish) {
+      notifyMainSiteRevalidate(nextStatus === 'published' ? 'content.published' : 'content.unpublished', {
+        docType,
+        id,
+        slug: (saved as any).slug || null,
+      });
+    }
+
     res.json({ item: saved });
   });
 
@@ -1838,6 +2109,8 @@ export function createApiApp(): express.Express {
     }
 
     const sendBinary = (buf: Buffer, mime: string, cacheControl = 'public, max-age=31536000, immutable') => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       res.setHeader('Content-Type', mime);
       res.setHeader('Content-Length', buf.length);
       res.setHeader('Cache-Control', cacheControl);
@@ -1928,12 +2201,20 @@ export function createApiApp(): express.Express {
         });
       }
 
-      // 4B: Main site deployment URL (deriving /images/... path after /public)
-      if (!fetched && mainSiteUrl && row.url.includes('/public/')) {
+      // 4B: Main site public asset fallback (deriving /images/... or /assets/... path after /public)
+      if (!fetched && row.url.includes('/public/')) {
         const relPath = row.url.slice(row.url.indexOf('/public/') + '/public'.length);
-        const headers: Record<string, string> = { 'User-Agent': 'RYZITE-CMS-Media-Proxy' };
-        if (vercelBypass) headers['x-vercel-protection-bypass'] = vercelBypass;
-        fetched = await fetchUpstreamBinary(`${mainSiteUrl}${relPath}`, headers);
+        const candidateBases = Array.from(
+          new Set([mainSiteUrl, 'https://ryzite.lk'].filter(Boolean))
+        );
+        for (const base of candidateBases) {
+          const headers: Record<string, string> = { 'User-Agent': 'RYZITE-CMS-Media-Proxy' };
+          if (vercelBypass && base === mainSiteUrl) {
+            headers['x-vercel-protection-bypass'] = vercelBypass;
+          }
+          fetched = await fetchUpstreamBinary(`${base}${relPath}`, headers);
+          if (fetched) break;
+        }
       }
 
       // 4C: Direct public URL fetch (if repo becomes public or URL is a public CDN)
@@ -1988,6 +2269,28 @@ export function createApiApp(): express.Express {
     res.status(404).json({
       error:
         'Image binary could not be retrieved from the upstream source. Configure GITHUB_TOKEN or MAIN_SITE_URL in Vercel environment variables, or use "Replace File" in Media Library to upload this asset directly.',
+    });
+  });
+
+  app.get('/api/media/status', requireAuth, async (_req, res) => {
+    const rows = await dbAll<{ id: string; source: string; has_cache: number }>(
+      "SELECT id, source, CASE WHEN content_data_url IS NOT NULL AND content_data_url != '' THEN 1 ELSE 0 END AS has_cache FROM media_assets"
+    );
+    const totalCount = rows.length;
+    const cachedCount = rows.filter((r) => Number(r.has_cache) === 1).length;
+    const mainSiteUncachedCount = rows.filter(
+      (r) => r.source === 'main-site' && Number(r.has_cache) === 0
+    ).length;
+
+    res.json({
+      totalCount,
+      cachedCount,
+      mainSiteUncachedCount,
+      githubTokenConfigured: Boolean(
+        (process.env.GITHUB_TOKEN || process.env.GITHUB_MEDIA_TOKEN || '').trim()
+      ),
+      mainSiteUrl: getMainSiteBaseUrl(),
+      sanityWriteTokenConfigured: hasSanityWriteToken(),
     });
   });
 
